@@ -67,12 +67,19 @@ static void PARebindPointers(struct mach_header_64 *header,
     @try {
         struct load_command *cmd =
             (struct load_command *)((uintptr_t)header + sizeof(struct mach_header_64));
+        // Hard bounds for every walk below: never read past the load
+        // commands area (a corrupt/garbage ncmds once SIGBUS-killed us).
+        const uintptr_t cmdsEnd =
+            (uintptr_t)header + sizeof(struct mach_header_64) + header->sizeofcmds;
 
         struct symtab_command *symtab = NULL;
         struct dysymtab_command *dysymtab = NULL;
 
         // First pass: locate tables.
         for (uint32_t i = 0; i < header->ncmds; i++) {
+            if ((uintptr_t)cmd + sizeof(struct load_command) > cmdsEnd) return;
+            if (cmd->cmdsize < sizeof(struct load_command)) return;
+            if ((uintptr_t)cmd + cmd->cmdsize > cmdsEnd) return;
             if (cmd->cmd == LC_SYMTAB) {
                 symtab = (struct symtab_command *)cmd;
             } else if (cmd->cmd == LC_DYSYMTAB) {
@@ -81,17 +88,50 @@ static void PARebindPointers(struct mach_header_64 *header,
             cmd = (struct load_command *)((uintptr_t)cmd + cmd->cmdsize);
         }
         if (!symtab || !dysymtab || !symtab->nsyms) return;
+        if (symtab->nsyms > 500000) return;
+
+        // File offsets (symoff/stroff/indirectsymoff) must be translated
+        // through __LINKEDIT: live = seg.vmaddr + slide + (off - seg.fileoff).
+        // (Assuming fileoff==memory offset is what made naive parsers
+        // read garbage on some images.)
+        uintptr_t linkeditLive = 0;
+        uint64_t linkeditFile = 0;
+        {
+            struct load_command *c =
+                (struct load_command *)((uintptr_t)header + sizeof(struct mach_header_64));
+            for (uint32_t i = 0; i < header->ncmds; i++) {
+                if ((uintptr_t)c + sizeof(struct load_command) > cmdsEnd) break;
+                if (c->cmdsize < sizeof(struct load_command)) break;
+                if ((uintptr_t)c + c->cmdsize > cmdsEnd) break;
+                if (c->cmd == LC_SEGMENT_64) {
+                    struct segment_command_64 *sg = (struct segment_command_64 *)c;
+                    if (strcmp(sg->segname, "__LINKEDIT") == 0) {
+                        linkeditLive = (uintptr_t)sg->vmaddr + (uintptr_t)slide;
+                        linkeditFile = sg->fileoff;
+                        break;
+                    }
+                }
+                c = (struct load_command *)((uintptr_t)c + c->cmdsize);
+            }
+        }
+        if (!linkeditLive) return;
+        if (symtab->symoff < linkeditFile || symtab->stroff < linkeditFile) return;
+        if (dysymtab->indirectsymoff < linkeditFile) return;
+        if (dysymtab->nindirectsyms > 1000000) return;
 
         const struct nlist_64 *symbols =
-            (struct nlist_64 *)((uintptr_t)header + symtab->symoff);
+            (struct nlist_64 *)(linkeditLive + (symtab->symoff - linkeditFile));
         const char *strings =
-            (const char *)((uintptr_t)header + symtab->stroff);
+            (const char *)(linkeditLive + (symtab->stroff - linkeditFile));
         const uint32_t *indirect =
-            (uint32_t *)((uintptr_t)header + dysymtab->indirectsymoff);
+            (uint32_t *)(linkeditLive + (dysymtab->indirectsymoff - linkeditFile));
 
         // Second pass: scan __DATA[(_CONST)] symbol-pointer sections.
         cmd = (struct load_command *)((uintptr_t)header + sizeof(struct mach_header_64));
         for (uint32_t i = 0; i < header->ncmds; i++) {
+            if ((uintptr_t)cmd + sizeof(struct load_command) > cmdsEnd) return;
+            if (cmd->cmdsize < sizeof(struct load_command)) return;
+            if ((uintptr_t)cmd + cmd->cmdsize > cmdsEnd) return;
             if (cmd->cmd == LC_SEGMENT_64) {
                 struct segment_command_64 *seg = (struct segment_command_64 *)cmd;
                 if (strcmp(seg->segname, "__DATA") == 0 ||
@@ -146,18 +186,22 @@ static void PARebindPointers(struct mach_header_64 *header,
 }
 
 static void PARebindAll(const char *name, void *replacement) {
-    if (!sRealCount) return;
-    const uint32_t total = sRealCount();
-    for (uint32_t i = 0; i < total; i++) {
-        @try {
-            const struct mach_header *hdr =
-                _dyld_get_image_header(i);
-            const intptr_t slide = _dyld_get_image_vmaddr_slide(i);
-            if (!hdr || hdr->magic != MH_MAGIC_64) continue;
-            PARebindPointers((struct mach_header_64 *)hdr, slide,
-                             name, replacement);
-        } @catch (NSException *e) {}
-    }
+    // Only rebind the MAIN executable (dyld index 0). That is where the
+    // game's integrity code lives, and its headers are always readable.
+    // Walking every shared-cache image is what killed us: some images'
+    // load-command area isn't mapped readable and hardware faults
+    // (SIGBUS/SIGSEGV) can't be caught with @try/@catch.
+    @try {
+        const struct mach_header *hdr = _dyld_get_image_header(0);
+        if (!hdr || hdr->magic != MH_MAGIC_64) return;
+        const struct mach_header_64 *hdr64 = (const struct mach_header_64 *)hdr;
+        // Sanity bounds: refuse absurd tables instead of walking off-image.
+        if (hdr64->ncmds == 0 || hdr64->ncmds > 256) return;
+        if (hdr64->sizeofcmds > 256 * 1024) return;
+        const intptr_t slide = _dyld_get_image_vmaddr_slide(0);
+        PARebindPointers((struct mach_header_64 *)hdr, slide,
+                         name, replacement);
+    } @catch (NSException *e) {}
 }
 
 // ---------------------------------------------------------------------------
