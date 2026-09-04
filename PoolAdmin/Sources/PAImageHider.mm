@@ -118,7 +118,7 @@ static void PARebindPointers(struct mach_header_64 *header,
                                 symIndex >= symtab->nsyms) {
                                 continue;
                             }
-                            const char *name = strings + symbols[symIndex].n_strx;
+                            const char *name = strings + symbols[symIndex].n_un.n_strx;
                             if (strcmp(name, targetName) == 0) {
                                 void **slot = &pointers[e];
                                 // __DATA_CONST is read-only: unlock the page.
