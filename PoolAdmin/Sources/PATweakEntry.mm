@@ -25,9 +25,9 @@ static BOOL PAAccountReady(void) {
     }
 }
 
-// Feature flags (read from pool.app/PoolAdminConfig.plist, all default YES).
-// Allows isolating a crashing subsystem without rebuilding: ship an IPA
-// with a flag set to NO and that subsystem never loads.
+// Feature flags (read from pool.app/PoolAdminConfig.plist, all default YES
+// except store hooks, which are opt-in: set PAEnableStoreHooks to true to
+// enable free-StoreKit interception).
 static BOOL PAFlagEnabled(NSString *key) {
     @try {
         NSString *path = [NSBundle.mainBundle pathForResource:@"PoolAdminConfig" ofType:@"plist"];
@@ -38,6 +38,20 @@ static BOOL PAFlagEnabled(NSString *key) {
         return YES;
     } @catch (NSException *e) {
         return YES;
+    }
+}
+
+// Opt-in flags: missing key means NO. Used for invasive hooks.
+static BOOL PAFlagOptIn(NSString *key) {
+    @try {
+        NSString *path = [NSBundle.mainBundle pathForResource:@"PoolAdminConfig" ofType:@"plist"];
+        NSDictionary *cfg = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+        id val = cfg[key];
+        if (!val) return NO;
+        if ([val respondsToSelector:@selector(boolValue)]) return [val boolValue];
+        return NO;
+    } @catch (NSException *e) {
+        return NO;
     }
 }
 
@@ -80,6 +94,56 @@ static UIWindow *PAFindBestWindow(void) {
         PALog(@"window lookup exception: %@", e);
     }
     return nil;
+}
+
+// Auto-pilot: before login, poll for the onboarding buttons (Terms
+// "Accept", "Play as Guest") and tap the first visible one. Beats the
+// freeze window without the user racing it. Pure UIKit search — if the
+// game draws these in Cocos it finds nothing and stays idle (logged).
+static UIButton *PAFindButton(UIView *view, NSArray<NSString *> *titles) {
+    @try {
+        if ([view isKindOfClass:UIButton.class]) {
+            UIButton *button = (UIButton *)view;
+            NSString *title = button.currentTitle ?: @"";
+            NSString *label = button.accessibilityLabel ?: @"";
+            NSString *both = [NSString stringWithFormat:@"%@ %@", title, label];
+            for (NSString *want in titles) {
+                if ([both localizedCaseInsensitiveContainsString:want]) {
+                    return button;
+                }
+            }
+        }
+        for (UIView *sub in view.subviews) {
+            UIButton *found = PAFindButton(sub, titles);
+            if (found) return found;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+static void PAAutoPilotTick(int remaining) {
+    if (remaining <= 0) return;
+    if (PAAccountReady()) {
+        PALog(@"autopilot stop: logged in");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            UIWindow *window = PAFindBestWindow();
+            UIButton *button = window ? PAFindButton(
+                window, @[@"Accept", @"Play as Guest"]) : nil;
+            if (button && button.enabled && !button.hidden &&
+                button.alpha > 0.01 && button.window) {
+                PALog(@"autopilot tapping '%@'",
+                      button.currentTitle ?: @"?");
+                [button sendActionsForControlEvents:UIControlEventTouchUpInside];
+            }
+        } @catch (NSException *e) {
+            PALog(@"autopilot exception %@", e);
+        }
+        PAAutoPilotTick(remaining - 1);
+    });
 }
 
 static void PAAttachViewsToWindow(int retryCount) {
@@ -205,7 +269,7 @@ static void PABootFromNotification(void) {
         PALog(@"stage=bypass result=disabled");
     }
 
-    if (PAFlagEnabled(@"PAEnableStoreHooks")) {
+    if (PAFlagOptIn(@"PAEnableStoreHooks")) {
         @try {
             [PAStoreInterceptor install];
             PALog(@"stage=store result=ok");
@@ -213,10 +277,12 @@ static void PABootFromNotification(void) {
             PALog(@"stage=store result=exception %@", exception);
         }
     } else {
-        PALog(@"stage=store result=disabled");
+        PALog(@"stage=store result=skipped-opt-in");
     }
 
     PAInstallWindowObserver();
+    // Auto-pilot covers onboarding for ~60s or until login.
+    PAAutoPilotTick(120);
     // Lifecycle markers: distinguish user/OS backgrounding and orderly
     // termination from sudden silent death (direct-syscall exit leaves
     // no crash log, but it also never posts WillTerminate).
