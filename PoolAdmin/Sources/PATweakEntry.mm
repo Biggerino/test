@@ -1,5 +1,6 @@
 #import <UIKit/UIKit.h>
 #import "PAImageHider.h"
+#import "PADiscovery.h"
 #import "PAIntegrityBypass.h"
 #import "PAStoreInterceptor.h"
 #import "PAOverlayView.h"
@@ -183,6 +184,14 @@ static void PABootFromNotification(void) {
         [PAExitGuard install];
     } @catch (NSException *exception) {
         PALog(@"stage=exitguard result=exception %@", exception);
+    }
+
+    // Read-only recon: dump the game's own integrity selector names so
+    // the bypass can target them precisely instead of guessing.
+    @try {
+        [PADiscovery run];
+    } @catch (NSException *exception) {
+        PALog(@"stage=discovery result=exception %@", exception);
     }
 
     if (PAFlagEnabled(@"PAEnableIntegrityBypass")) {
