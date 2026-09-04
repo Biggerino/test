@@ -4,52 +4,57 @@
 #import "PAOverlayView.h"
 #import "PAAdminPanel.h"
 
+// Feature flags (read from pool.app/PoolAdminConfig.plist, all default YES).
+// Allows isolating a crashing subsystem without rebuilding: ship an IPA
+// with a flag set to NO and that subsystem never loads.
+static BOOL PAFlagEnabled(NSString *key) {
+    @try {
+        NSString *path = [NSBundle.mainBundle pathForResource:@"PoolAdminConfig" ofType:@"plist"];
+        NSDictionary *cfg = path ? [NSDictionary dictionaryWithContentsOfFile:path] : nil;
+        id val = cfg[key];
+        if (!val) return YES;
+        if ([val respondsToSelector:@selector(boolValue)]) return [val boolValue];
+        return YES;
+    } @catch (NSException *e) {
+        return YES;
+    }
+}
+
 // Forward declarations
 static void PAAttachViewsToWindow(int retryCount);
 static UIWindow *PAFindBestWindow(void);
 
-// Scene-aware window lookup. Works on iOS 11 (keyWindow) through iOS 13+
-// (UIScene). Never returns a hidden window. Never crashes if UIKit isn't
-// ready yet — returns nil so the caller can retry.
+// Window lookup. keyWindow/windows only — no UIScene API references, so the
+// binary has zero weak-linked data symbols and loads on any iOS our min
+// deployment target supports. Never crashes: returns nil when UIKit isn't
+// ready so the caller retries.
 static UIWindow *PAFindBestWindow(void) {
     @try {
-        UIApplication *app = UIApplication.sharedApplication;
+        UIApplication *app = nil;
+        @try {
+            app = UIApplication.sharedApplication;
+        } @catch (NSException *e) {
+            return nil;
+        }
         if (!app) return nil;
 
-        // iOS 13+: walk connected scenes for the foreground active window.
-        if (@available(iOS 13.0, *)) {
-            for (UIScene *scene in app.connectedScenes) {
-                if (![scene isKindOfClass:UIWindowScene.class]) continue;
-                UIWindowScene *ws = (UIWindowScene *)scene;
-                if (ws.activationState != UISceneActivationStateForegroundActive &&
-                    ws.activationState != UISceneActivationStateForegroundInactive) {
-                    continue;
-                }
-                for (UIWindow *w in ws.windows) {
-                    if (!w.isHidden && w.bounds.size.width > 0) return w;
-                }
+        @try {
+            UIWindow *key = app.keyWindow;
+            if (key && !key.isHidden && key.bounds.size.width > 0) return key;
+        } @catch (NSException *e) {}
+        @try {
+            for (UIWindow *w in app.windows) {
+                if (!w.isHidden && w.bounds.size.width > 0) return w;
             }
-            // Fallback: any visible window in any scene.
-            for (UIScene *scene in app.connectedScenes) {
-                if (![scene isKindOfClass:UIWindowScene.class]) continue;
-                for (UIWindow *w in ((UIWindowScene *)scene).windows) {
-                    if (!w.isHidden && w.bounds.size.width > 0) return w;
-                }
+        } @catch (NSException *e) {}
+        @try {
+            id delegate = app.delegate;
+            if ([delegate respondsToSelector:@selector(window)]) {
+                UIWindow *dw = [delegate valueForKey:@"window"];
+                if ([dw isKindOfClass:UIWindow.class] && !dw.isHidden &&
+                    ((UIWindow *)dw).bounds.size.width > 0) return dw;
             }
-        }
-
-        // iOS 11/12 path + final fallback.
-        UIWindow *key = app.keyWindow;
-        if (key && !key.isHidden) return key;
-        for (UIWindow *w in app.windows) {
-            if (!w.isHidden && w.bounds.size.width > 0) return w;
-        }
-        // Last resort: app delegate window (works before scenes attach).
-        id delegate = app.delegate;
-        if ([delegate respondsToSelector:@selector(window)]) {
-            UIWindow *dw = [delegate valueForKey:@"window"];
-            if ([dw isKindOfClass:UIWindow.class] && !dw.isHidden) return dw;
-        }
+        } @catch (NSException *e) {}
     } @catch (NSException *e) {
         NSLog(@"[PoolAdmin] window lookup exception: %@", e);
     }
@@ -58,11 +63,10 @@ static UIWindow *PAFindBestWindow(void) {
 
 static void PAAttachViewsToWindow(int retryCount) {
     if (retryCount <= 0) {
-        NSLog(@"[PoolAdmin] Failed to find window after retries.");
+        NSLog(@"[PoolAdmin] stage=attach result=no-window");
         return;
     }
 
-    // All UIKit work must be on the main thread.
     if (!NSThread.isMainThread) {
         dispatch_async(dispatch_get_main_queue(), ^{
             PAAttachViewsToWindow(retryCount);
@@ -72,7 +76,6 @@ static void PAAttachViewsToWindow(int retryCount) {
 
     UIWindow *window = PAFindBestWindow();
     if (!window) {
-        // Retry after 1 second
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             PAAttachViewsToWindow(retryCount - 1);
@@ -80,22 +83,36 @@ static void PAAttachViewsToWindow(int retryCount) {
         return;
     }
 
-    @try {
-        // Avoid double-attach (e.g. scene reconnect fires twice).
-        [[PAOverlayView shared] attachToWindow:window];
-        [[PAAdminPanel shared] attachToWindow:window];
-        NSLog(@"[PoolAdmin] Tweak loaded successfully.");
-    } @catch (NSException *exception) {
-        NSLog(@"[PoolAdmin] Exception attaching views: %@", exception);
+    // Overlay and panel boot independently: if one throws, the other still loads.
+    if (PAFlagEnabled(@"PAEnableOverlay")) {
+        @try {
+            [[PAOverlayView shared] attachToWindow:window];
+            NSLog(@"[PoolAdmin] stage=overlay result=ok");
+        } @catch (NSException *exception) {
+            NSLog(@"[PoolAdmin] stage=overlay result=exception %@", exception);
+        }
+    } else {
+        NSLog(@"[PoolAdmin] stage=overlay result=disabled");
     }
+
+    if (PAFlagEnabled(@"PAEnablePanel")) {
+        @try {
+            [[PAAdminPanel shared] attachToWindow:window];
+            NSLog(@"[PoolAdmin] stage=panel result=ok");
+        } @catch (NSException *exception) {
+            NSLog(@"[PoolAdmin] stage=panel result=exception %@", exception);
+        }
+    } else {
+        NSLog(@"[PoolAdmin] stage=panel result=disabled");
+    }
+    NSLog(@"[PoolAdmin] stage=attach result=done");
 }
 
-// Re-attach when a new window becomes visible (scene connect, rotation,
-// external display, etc.). The attach methods are idempotent.
+// Re-attach when a new window becomes visible. Attach methods are idempotent.
 static void PAInstallWindowObserver(void) {
     @try {
         [NSNotificationCenter.defaultCenter
-            addObserverForName:UIWindowDidBecomeVisibleNotification
+            addObserverForName:@"UIWindowDidBecomeVisibleNotification"
                         object:nil
                          queue:NSOperationQueue.mainQueue
                     usingBlock:^(NSNotification *note) {
@@ -103,8 +120,14 @@ static void PAInstallWindowObserver(void) {
                 UIWindow *w = [note.object isKindOfClass:UIWindow.class]
                     ? (UIWindow *)note.object : PAFindBestWindow();
                 if (w && !w.isHidden) {
-                    [[PAOverlayView shared] attachToWindow:w];
-                    [[PAAdminPanel shared] attachToWindow:w];
+                    if (PAFlagEnabled(@"PAEnableOverlay")) {
+                        @try { [[PAOverlayView shared] attachToWindow:w]; }
+                        @catch (NSException *e) {}
+                    }
+                    if (PAFlagEnabled(@"PAEnablePanel")) {
+                        @try { [[PAAdminPanel shared] attachToWindow:w]; }
+                        @catch (NSException *e) {}
+                    }
                 }
             } @catch (NSException *e) {}
         }];
@@ -112,46 +135,54 @@ static void PAInstallWindowObserver(void) {
 }
 
 static void PABootFromNotification(void) {
-    @try {
-        [PAIntegrityBypass install];
-    } @catch (NSException *exception) {
-        NSLog(@"[PoolAdmin] Integrity bypass exception: %@", exception);
+    NSLog(@"[PoolAdmin] stage=boot begin");
+
+    if (PAFlagEnabled(@"PAEnableIntegrityBypass")) {
+        @try {
+            [PAIntegrityBypass install];
+            NSLog(@"[PoolAdmin] stage=bypass result=ok");
+        } @catch (NSException *exception) {
+            NSLog(@"[PoolAdmin] stage=bypass result=exception %@", exception);
+        }
+    } else {
+        NSLog(@"[PoolAdmin] stage=bypass result=disabled");
     }
 
-    @try {
-        [PAStoreInterceptor install];
-    } @catch (NSException *exception) {
-        NSLog(@"[PoolAdmin] Store interceptor exception: %@", exception);
+    if (PAFlagEnabled(@"PAEnableStoreHooks")) {
+        @try {
+            [PAStoreInterceptor install];
+            NSLog(@"[PoolAdmin] stage=store result=ok");
+        } @catch (NSException *exception) {
+            NSLog(@"[PoolAdmin] stage=store result=exception %@", exception);
+        }
+    } else {
+        NSLog(@"[PoolAdmin] stage=store result=disabled");
     }
 
     PAInstallWindowObserver();
-    // Small delay lets the game finish creating its window/scene.
+    // Delay lets the game finish creating its window.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        PAAttachViewsToWindow(15); // Try up to ~15 seconds
+        PAAttachViewsToWindow(15);
     });
 }
 
+// NOTE: constructor intentionally does the bare minimum — registers ONE
+// observer using only stringly-typed API names available since iOS 2.
+// No UIScene symbols, no UIKit class references, no view code here.
 static void __attribute__((constructor)) PAPoolAdminInit(void) {
-    NSLog(@"[PoolAdmin] Initializing...");
+    NSLog(@"[PoolAdmin] stage=init begin");
     @try {
-        // Do NOT touch UIApplication.sharedApplication here — at constructor
-        // time UIKit may not be ready and keyWindow calls can deadlock/crash.
-        // Defer everything until the app finishes launching.
         __block id finishObserver = nil;
-        __block id sceneObserver = nil;
         void (^bootOnce)(void) = ^{
             static dispatch_once_t once;
             dispatch_once(&once, ^{
-                if (finishObserver) {
-                    [NSNotificationCenter.defaultCenter removeObserver:finishObserver];
-                    finishObserver = nil;
-                }
-                if (sceneObserver) {
-                    [NSNotificationCenter.defaultCenter removeObserver:sceneObserver];
-                    sceneObserver = nil;
-                }
-                // Always boot on main thread.
+                @try {
+                    if (finishObserver) {
+                        [NSNotificationCenter.defaultCenter removeObserver:finishObserver];
+                        finishObserver = nil;
+                    }
+                } @catch (NSException *e) {}
                 if (NSThread.isMainThread) {
                     PABootFromNotification();
                 } else {
@@ -162,45 +193,26 @@ static void __attribute__((constructor)) PAPoolAdminInit(void) {
             });
         };
 
-        // Normal path: app posts this once UIKit is up.
         finishObserver = [NSNotificationCenter.defaultCenter
-            addObserverForName:UIApplicationDidFinishLaunchingNotification
+            addObserverForName:@"UIApplicationDidFinishLaunchingNotification"
                         object:nil
                          queue:nil
                     usingBlock:^(NSNotification *note) {
-            // Push boot to the next runloop turn so the game window exists.
+            (void)note;
             dispatch_async(dispatch_get_main_queue(), ^{
                 bootOnce();
             });
         }];
 
-        // Scene-based apps (iOS 13+) may launch without the above posting
-        // before our observer registers — also listen for scene connect.
-        if (@available(iOS 13.0, *)) {
-            sceneObserver = [NSNotificationCenter.defaultCenter
-                addObserverForName:UISceneWillConnectNotification
-                            object:nil
-                             queue:nil
-                        usingBlock:^(NSNotification *note) {
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                             (int64_t)(1.5 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    bootOnce();
-                });
-            }];
-        }
-
-        // Safety net: if neither notification ever fires (e.g. injected very
-        // late), boot after 5s anyway. bootOnce's dispatch_once makes this
-        // harmless if the normal path already ran.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-                                     (int64_t)(5.0 * NSEC_PER_SEC)),
+        // Safety net if the notification never fires (late injection).
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(8.0 * NSEC_PER_SEC)),
                        dispatch_get_global_queue(QOS_CLASS_BACKGROUND, 0), ^{
             dispatch_async(dispatch_get_main_queue(), ^{
                 bootOnce();
             });
         });
+        NSLog(@"[PoolAdmin] stage=init result=ok");
     } @catch (NSException *exception) {
-        NSLog(@"[PoolAdmin] Init exception: %@", exception);
+        NSLog(@"[PoolAdmin] stage=init result=exception %@", exception);
     }
 }

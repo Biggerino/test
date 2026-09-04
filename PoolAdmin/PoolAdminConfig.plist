@@ -8,5 +8,12 @@
 	<array/>
 	<key>Presets</key>
 	<array/>
+	<!-- Subsystem kill-switches. All default to YES when missing.
+	     Set one to <false/> and repack the IPA to isolate a crash
+	     without rebuilding the dylib. -->
+	<key>PAEnableIntegrityBypass</key><true/>
+	<key>PAEnableStoreHooks</key><true/>
+	<key>PAEnableOverlay</key><true/>
+	<key>PAEnablePanel</key><true/>
 </dict>
 </plist>
