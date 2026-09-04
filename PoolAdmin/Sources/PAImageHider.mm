@@ -27,6 +27,28 @@ static BOOL PAIsHiddenPath(const char *path) {
 
 static uint32_t (*sRealCount)(void) = NULL;
 static const char *(*sRealName)(uint32_t) = NULL;
+static const struct mach_header *(*sRealHeader)(uint32_t) = NULL;
+static intptr_t (*sRealSlide)(uint32_t) = NULL;
+
+// Map a caller's index to the underlying real index, skipping hidden
+// images. All four hooks share this so header/slide/name stay consistent.
+static uint32_t PAMappedIndex(uint32_t index, uint32_t *outTotal) {
+    uint32_t total = sRealCount ? sRealCount() : 0;
+    if (outTotal) *outTotal = total;
+    uint32_t seen = 0;
+    for (uint32_t i = 0; i < total; i++) {
+        const char *name = NULL;
+        @try {
+            name = sRealName ? sRealName(i) : NULL;
+        } @catch (NSException *e) {
+            continue;
+        }
+        if (PAIsHiddenPath(name)) continue;
+        if (seen == index) return i;
+        seen++;
+    }
+    return total;  // out of range sentinel
+}
 
 static uint32_t PA_image_count(void) {
     if (!sRealCount) return 0;
@@ -41,21 +63,39 @@ static uint32_t PA_image_count(void) {
 }
 
 static const char *PA_image_name(uint32_t index) {
-    if (!sRealName) return NULL;
-    const uint32_t total = sRealCount ? sRealCount() : 0;
-    uint32_t seen = 0;
-    for (uint32_t i = 0; i < total; i++) {
-        const char *name = NULL;
-        @try {
-            name = sRealName(i);
-        } @catch (NSException *e) {
-            continue;
-        }
-        if (PAIsHiddenPath(name)) continue;
-        if (seen == index) return name;
-        seen++;
+    if (!sRealName || !sRealCount) return NULL;
+    uint32_t total = 0;
+    const uint32_t real = PAMappedIndex(index, &total);
+    if (real >= total) return NULL;
+    @try {
+        return sRealName(real);
+    } @catch (NSException *e) {
+        return NULL;
     }
-    return NULL;
+}
+
+static const struct mach_header *PA_image_header(uint32_t index) {
+    if (!sRealHeader || !sRealCount) return NULL;
+    uint32_t total = 0;
+    const uint32_t real = PAMappedIndex(index, &total);
+    if (real >= total) return NULL;
+    @try {
+        return sRealHeader(real);
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+
+static intptr_t PA_image_slide(uint32_t index) {
+    if (!sRealSlide || !sRealCount) return 0;
+    uint32_t total = 0;
+    const uint32_t real = PAMappedIndex(index, &total);
+    if (real >= total) return 0;
+    @try {
+        return sRealSlide(real);
+    } @catch (NSException *e) {
+        return 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -259,9 +299,15 @@ static id PA_allFrameworks(id self, SEL _cmd) {
             // any rebinding (dlsym would return rebound pointers later).
             sRealCount = &_dyld_image_count;
             sRealName = &_dyld_get_image_name;
+            sRealHeader = &_dyld_get_image_header;
+            sRealSlide = &_dyld_get_image_vmaddr_slide;
 
             PARebindAll("_dyld_image_count", (void *)&PA_image_count);
             PARebindAll("_dyld_get_image_name", (void *)&PA_image_name);
+            PARebindAll("_dyld_get_image_header",
+                        (void *)&PA_image_header);
+            PARebindAll("_dyld_get_image_vmaddr_slide",
+                        (void *)&PA_image_slide);
 
             // Filter +[NSBundle allFrameworks].
             Class meta = object_getClass((id)[NSBundle class]);

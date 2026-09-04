@@ -42,7 +42,7 @@ xcrun clang++ -arch arm64 \
   -O2 -DNDEBUG \
   -std=c++17 -stdlib=libc++ \
   -dynamiclib \
-  -install_name "@rpath/libloader.framework/libloader" \
+  -install_name "@rpath/BloomKit.framework/BloomKit" \
   -compatibility_version 1 -current_version 1 \
   -framework Foundation -framework UIKit -framework CoreGraphics \
   -framework QuartzCore -framework StoreKit -framework Security \

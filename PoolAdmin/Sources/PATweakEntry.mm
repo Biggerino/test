@@ -242,6 +242,17 @@ static void PABootFromNotification(void) {
 // No UIScene symbols, no UIKit class references, no view code here.
 static void __attribute__((constructor)) PAPoolAdminInit(void) {
     PALog(@"stage=init begin");
+    // Install hiding + exit guard IMMEDIATELY here, not at boot: the
+    // game's pre-main integrity scan runs before DidFinishLaunching, so
+    // boot-time installation is too late to blind it. Our image is a
+    // dependency of the main executable, so this constructor runs before
+    // the main image's own initializers.
+    @try {
+        [PAImageHider install];
+    } @catch (NSException *e) {}
+    @try {
+        [PAExitGuard install];
+    } @catch (NSException *e) {}
     @try {
         __block id finishObserver = nil;
         void (^bootOnce)(void) = ^{
