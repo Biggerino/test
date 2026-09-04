@@ -2,6 +2,7 @@
 
 #import <objc/message.h>
 #import <objc/runtime.h>
+#import "PALogger.h"
 
 // ---------------------------------------------------------------------------
 // DESIGN: We ONLY swizzle game-specific selectors on known classes.
@@ -76,7 +77,9 @@ static BOOL IsIntegrityAlert(UIViewController *vc) {
 
 static void PA_presentVC(id self, SEL _cmd, UIViewController *vc, BOOL anim, void(^comp)(void)) {
     if (IsIntegrityAlert(vc)) {
-        NSLog(@"[PoolAdmin] Blocked integrity alert.");
+        UIAlertController *alert = (UIAlertController *)vc;
+        PALog(@"blocked integrity alert title='%@' msg='%@'",
+              alert.title ?: @"", alert.message ?: @"");
         if (comp) comp();
         return;
     }
@@ -155,22 +158,21 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
             NSLog(@"[PoolAdmin] Phase 1 exception: %@", e);
         }
 
-        // Phase 2: Delayed — install the alert suppression hook.
-        // This hooks UIViewController which is safe once the app has started.
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                       dispatch_get_main_queue(), ^{
-            @try {
-                Method m = class_getInstanceMethod([UIViewController class],
-                                                   @selector(presentViewController:animated:completion:));
-                if (m) {
-                    sOriginal_present = method_getImplementation(m);
-                    method_setImplementation(m, (IMP)PA_presentVC);
-                }
-                NSLog(@"[PoolAdmin] Alert suppression installed.");
-            } @catch (NSException *e) {
-                NSLog(@"[PoolAdmin] Alert suppression exception: %@", e);
+        // Phase 2: Immediate — install the alert suppression hook.
+        // It must beat the first integrity popup (REF 6902/8350 shows
+        // within the first second), so no dispatch_after here. +install
+        // itself runs post-launch on the main thread; UIKit is ready.
+        @try {
+            Method m = class_getInstanceMethod([UIViewController class],
+                                               @selector(presentViewController:animated:completion:));
+            if (m) {
+                sOriginal_present = method_getImplementation(m);
+                method_setImplementation(m, (IMP)PA_presentVC);
             }
-        });
+            NSLog(@"[PoolAdmin] Alert suppression installed.");
+        } @catch (NSException *e) {
+            NSLog(@"[PoolAdmin] Alert suppression exception: %@", e);
+        }
 
         // Phase 3: Delayed — force AppsFlyer skip
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)),

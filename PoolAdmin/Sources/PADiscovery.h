@@ -10,6 +10,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// of guessing. Bounded output (stops after kMaxLines).
 @interface PADiscovery : NSObject
 + (void)run;
++ (void)runInBackground;
 @end
 
 NS_ASSUME_NONNULL_END

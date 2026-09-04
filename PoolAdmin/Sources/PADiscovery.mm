@@ -39,7 +39,15 @@ BOOL PADiscoveryMatch(NSString *name) {
 + (void)run {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        @try {
+        // Off the main thread: full runtime enumeration blocks ~2s.
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+            [self runInBackground];
+        });
+    });
+}
+
++ (void)runInBackground {
+    @try {
             PALog(@"stage=discovery begin");
             int poolIndex = -1;
             const uint32_t total = _dyld_image_count();
@@ -60,7 +68,9 @@ BOOL PADiscoveryMatch(NSString *name) {
             }
 
             int classCount = objc_getClassList(NULL, 0);
-            if (classCount <= 0 || classCount > 100000) {
+            // iOS 26 processes host 100k+ classes with the shared cache;
+            // only the old absurd cap was wrong, not the count.
+            if (classCount <= 0 || classCount > 500000) {
                 PALog(@"stage=discovery result=bad-count %d", classCount);
                 return;
             }
