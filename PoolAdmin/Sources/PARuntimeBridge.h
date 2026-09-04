@@ -5,15 +5,20 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface PARuntimeSnapshot : NSObject
+@interface PARuntimeSnapshot : NSObject {
+    double _transformX[3];
+    double _transformY[3];
+}
 @property(nonatomic, copy) NSArray<PABallState *> *balls;
 @property(nonatomic) PARect tableBounds;
 @property(nonatomic) double aimAngle;
 @property(nonatomic) BOOL inGame;
 @property(nonatomic) BOOL offlineGame;
 @property(nonatomic, weak, nullable) UIView *gameView;
-@property(nonatomic) double transformX[3];
-@property(nonatomic) double transformY[3];
+// C arrays can't be @properties — exposed via methods returning a mutable
+// pointer to the internal buffer. Dot syntax (snapshot.transformX) still works.
+- (double *)transformX;
+- (double *)transformY;
 @property(nonatomic) BOOL hasTransform;
 - (CGPoint)overlayPointForPhysicsPoint:(PAVector)point overlayView:(UIView *)overlayView;
 @end

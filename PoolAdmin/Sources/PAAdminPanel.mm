@@ -31,7 +31,12 @@ static UIColor *PAPurpleColor(void)      { return [UIColor colorWithRed:0.65 gre
 
 static UIFont *PAFont(CGFloat size)      { return [UIFont systemFontOfSize:size weight:UIFontWeightMedium]; }
 static UIFont *PABoldFont(CGFloat size)  { return [UIFont systemFontOfSize:size weight:UIFontWeightBold]; }
-static UIFont *PAMonoFont(CGFloat size)  { return [UIFont monospacedSystemFontOfSize:size weight:UIFontWeightRegular]; }
+static UIFont *PAMonoFont(CGFloat size) {
+    if (@available(iOS 13.0, *)) {
+        return [UIFont monospacedSystemFontOfSize:size weight:UIFontWeightRegular];
+    }
+    return [UIFont fontWithName:@"Menlo-Regular" size:size] ?: [UIFont systemFontOfSize:size];
+}
 
 // ---------------------------------------------------------------------------
 #pragma mark - Helpers

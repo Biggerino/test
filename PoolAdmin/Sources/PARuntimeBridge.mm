@@ -137,6 +137,9 @@ static NSError *RuntimeError(NSString *message) {
 
 @implementation PARuntimeSnapshot
 
+- (double *)transformX { return _transformX; }
+- (double *)transformY { return _transformY; }
+
 - (CGPoint)overlayPointForPhysicsPoint:(PAVector)point overlayView:(UIView *)overlayView {
     if (!self.hasTransform) return CGPointZero;
     const CGPoint cocosPoint = CGPointMake(self.transformX[0] * point.x +
