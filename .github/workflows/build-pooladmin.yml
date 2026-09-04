@@ -19,11 +19,18 @@ jobs:
       - name: Build libPoolAdmin.dylib
         run: |
           cd PoolAdmin
-          chmod +x build.sh
+          chmod +x build.sh build-minimal.sh
           ./build.sh
+          ./build-minimal.sh
 
       - name: Upload dylib
         uses: actions/upload-artifact@v4
         with:
           name: libPoolAdmin
           path: PoolAdmin/build/libPoolAdmin.dylib
+
+      - name: Upload minimal test dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: libPoolAdmin-minimal
+          path: PoolAdmin/build/libPoolAdmin-minimal.dylib
