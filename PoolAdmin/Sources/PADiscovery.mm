@@ -6,9 +6,58 @@
 
 namespace {
 
-const NSUInteger kMaxLines = 400;
+const NSUInteger kMaxLines = 200;
 
-BOOL PADiscoveryMatch(NSString *name) {    static NSArray<NSString *> *keywords;
+// Ad-network / system prefixes: enumerated last (or never) so the
+// 400-line budget isn't eaten by IronSource/Mintegral/etc. Thousands of
+// their methods match generic keywords like "storekit" or "forKey".
+BOOL PADiscoveryExcluded(NSString *className) {
+    static NSArray<NSString *> *prefixes;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        prefixes = @[
+            @"IS", @"MTG", @"GADM", @"GAD", @"IAS", @"ALAd", @"FB",
+            @"FIR", @"MP", @"MoPub", @"Vungle", @"Unity", @"IronSource",
+            @"Supersonic", @"Mintegral", @"AppLovin", @"InMobi",
+            @"Moloco", @"AdSurge", @"AppsFlyer", @"AF", @"Google",
+            @"OMID", @"LevelPlay", @"LPM", @"SSE", @"SSA", @"FBL",
+            @"FBSDK", @"GMS", @"GTM", @"Chartboost", @"Tapjoy",
+            @"AdColony", @"VAST", @"IMA", @"Pangle", @"AMZN",
+            @"Amazon", @"SK", @"SKAd", @"NS", @"UI", @"_", @"AV",
+            @"CA", @"CG", @"CF", @"MK", @"CL", @"PH", @"CN", @"EK",
+            @"HK", @"NE", @"NW", @"WK", @"SC", @"SF", @"IN",
+        ];
+    });
+    for (NSString *prefix in prefixes) {
+        if ([className hasPrefix:prefix]) return YES;
+    }
+    return NO;
+}
+
+// Game-side priority: Miniclip's own classes live here. Phase 1 scans
+// only these; phase 2 scans the rest (minus excluded prefixes).
+BOOL PADiscoveryPriority(NSString *className) {
+    static NSArray<NSString *> *markers;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        markers = @[
+            @"game", @"manager", @"menu", @"user", @"pool", @"table",
+            @"match", @"cue", @"miniclip", @"payment", @"purchase",
+            @"receipt", @"attest", @"fraud", @"integrity", @"tamper",
+            @"jailbreak", @"verify", @"licens", @"drm", @"protect",
+            @"threat", @"alert", @"dialog", @"popup", @"account",
+            @"login", @"session", @"auth", @"menustate", @"unofficial",
+        ];
+    });
+    NSString *lower = className.lowercaseString;
+    for (NSString *marker in markers) {
+        if ([lower containsString:marker]) return YES;
+    }
+    return NO;
+}
+
+BOOL PADiscoveryMatch(NSString *name) {
+    static NSArray<NSString *> *keywords;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         keywords = @[
@@ -21,7 +70,9 @@ BOOL PADiscoveryMatch(NSString *name) {    static NSArray<NSString *> *keywords;
             @"debugger", @"ptrace", @"sysctl", @"fork", @"cydia",
             @"substrate", @"dylib", @"imagecount", @"loadedimage",
             @"bundleid", @"provision", @"entitle", @"sandbox",
-            @"fairplay", @"drm",
+            @"fairplay", @"drm", @"menustate", @"popup", @"dialog",
+            @"threat", @"protect", @"licens", @"payment", @"purchase",
+            @"ref", @"close", @"account", @"session",
         ];
     });
     NSString *lower = name.lowercaseString;
@@ -31,18 +82,14 @@ BOOL PADiscoveryMatch(NSString *name) {    static NSArray<NSString *> *keywords;
     return NO;
 }
 
-}  // namespace
-
 // Auto-hook: for high-confidence verdict selectors (no-arg, BOOL/void
 // return, hostile keyword in the name), neutralize immediately and log.
 // Type encoding is checked first, so only provably compatible methods
-// are touched. Runs on the background queue; method_setImplementation
-// is thread-safe for distinct methods.
-static BOOL PAAutoHookVerdict(Class target, NSString *className,
-                              NSString *selName, Method method) {
+// are touched.
+BOOL PAAutoHookVerdict(Class target, NSString *className,
+                       NSString *selName, Method method) {
     const char *encoding = method_getTypeEncoding(method);
     if (!encoding) return NO;
-    // No-arg methods only: encodings look like "B@:" / "c@:" / "v@:".
     if (strlen(encoding) < 3 || encoding[1] != '@' || encoding[2] != ':') {
         return NO;
     }
@@ -56,7 +103,7 @@ static BOOL PAAutoHookVerdict(Class target, NSString *className,
     NSArray<NSString *> *badWords = @[
         @"jailbreak", @"jailbroken", @"tamper", @"fraud", @"cheat",
         @"hack", @"debugger", @"cydia", @"substrate", @"pirat",
-        @"crack", @"untrust", @" unofficial",
+        @"crack", @"untrust", @"unofficial",
     ];
     NSArray<NSString *> *goodWords = @[
         @"appstore", @"app_store", @"genuine", @"legit", @"official",
@@ -112,6 +159,54 @@ static BOOL PAAutoHookVerdict(Class target, NSString *className,
     return NO;
 }
 
+void PADiscoveryScan(Class *classes, int classCount, BOOL priorityOnly,
+                     NSUInteger *lines) {
+    for (int ci = 0; ci < classCount && *lines < kMaxLines; ci++) {
+        Class cls = classes[ci];
+        if (!cls) continue;
+        const char *imageName = class_getImageName(cls);
+        if (!imageName) continue;
+        NSString *imagePath =
+            [NSString stringWithUTF8String:imageName];
+        if (![imagePath hasSuffix:@"/pool.app/pool"]) continue;
+
+        NSString *className = NSStringFromClass(cls);
+        // Priority game classes are never excluded (e.g. SKPaymentsReceiver
+        // matches the SK* system-looking prefix but is Miniclip's own).
+        const BOOL priority = PADiscoveryPriority(className);
+        if (!priority && PADiscoveryExcluded(className)) continue;
+        if (priorityOnly != priority) continue;
+
+        const BOOL classHit = PADiscoveryMatch(className);
+        for (int pass = 0; pass < 2 && *lines < kMaxLines; pass++) {
+            Class target =
+                (pass == 0) ? cls : object_getClass(cls);
+            if (!target) continue;
+            unsigned int methodCount = 0;
+            Method *methods =
+                class_copyMethodList(target, &methodCount);
+            if (!methods) continue;
+            for (unsigned int mi = 0;
+                 mi < methodCount && *lines < kMaxLines; mi++) {
+                NSString *selName =
+                    NSStringFromSelector(method_getName(methods[mi]));
+                if (classHit || PADiscoveryMatch(selName)) {
+                    PALog(@"discover %@[%@ %@]", pass == 0 ? @"-" : @"+",
+                          className, selName);
+                    (*lines)++;
+                    if (pass == 0) {
+                        PAAutoHookVerdict(target, className, selName,
+                                          methods[mi]);
+                    }
+                }
+            }
+            free(methods);
+        }
+    }
+}
+
+}  // namespace
+
 @implementation PADiscovery
 
 + (void)run {
@@ -157,48 +252,11 @@ static BOOL PAAutoHookVerdict(Class target, NSString *className,
         if (!classes) return;
         classCount = objc_getClassList(classes, classCount);
 
+        // Phase 1: game classes first (Miniclip's verdict lives here).
         NSUInteger lines = 0;
-        for (int ci = 0; ci < classCount && lines < kMaxLines; ci++) {
-            Class cls = classes[ci];
-            if (!cls) continue;
-            const char *imageName = class_getImageName(cls);
-            if (!imageName) continue;
-            NSString *imagePath =
-                [NSString stringWithUTF8String:imageName];
-            if (![imagePath hasSuffix:@"/pool.app/pool"]) continue;
-
-            NSString *className = NSStringFromClass(cls);
-            const BOOL classHit = PADiscoveryMatch(className);
-
-            // Instance + class methods.
-            for (int pass = 0; pass < 2 && lines < kMaxLines; pass++) {
-                Class target =
-                    (pass == 0) ? cls : object_getClass(cls);
-                if (!target) continue;
-                unsigned int methodCount = 0;
-                Method *methods =
-                    class_copyMethodList(target, &methodCount);
-                if (!methods) continue;
-                for (unsigned int mi = 0;
-                     mi < methodCount && lines < kMaxLines; mi++) {
-                    NSString *selName =
-                        NSStringFromSelector(method_getName(methods[mi]));
-                    if (classHit || PADiscoveryMatch(selName)) {
-                        PALog(@"discover %@[%@ %@]", pass == 0 ? @"-" : @"+",
-                              className, selName);
-                        lines++;
-                        // Instance methods only (pass 0): try immediate
-                        // neutralization; class methods are logged for
-                        // the next targeted build.
-                        if (pass == 0) {
-                            PAAutoHookVerdict(target, className, selName,
-                                              methods[mi]);
-                        }
-                    }
-                }
-                free(methods);
-            }
-        }
+        PADiscoveryScan(classes, classCount, YES, &lines);
+        // Phase 2: everything else still matching.
+        PADiscoveryScan(classes, classCount, NO, &lines);
         free(classes);
         PALog(@"stage=discovery result=done lines=%lu", (unsigned long)lines);
     } @catch (NSException *e) {
