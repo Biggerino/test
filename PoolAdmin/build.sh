@@ -21,6 +21,7 @@ mkdir -p "$OUT_DIR"
 
 SOURCES=(
   Sources/PATweakEntry.mm
+  Sources/PAImageHider.mm
   Sources/PAAdminPanel.mm
   Sources/PAOverlayView.mm
   Sources/PARuntimeBridge.mm

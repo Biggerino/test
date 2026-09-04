@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import "PAImageHider.h"
 #import "PAIntegrityBypass.h"
 #import "PAStoreInterceptor.h"
 #import "PAOverlayView.h"
@@ -162,6 +163,14 @@ static void PAInstallWindowObserver(void) {
 
 static void PABootFromNotification(void) {
     NSLog(@"[PoolAdmin] stage=boot begin");
+
+    // Hide our image from dyld/NSBundle enumeration FIRST, before any
+    // other hook runs — the game's local checks scan for foreign images.
+    @try {
+        [PAImageHider install];
+    } @catch (NSException *exception) {
+        NSLog(@"[PoolAdmin] stage=hider result=exception %@", exception);
+    }
 
     if (PAFlagEnabled(@"PAEnableIntegrityBypass")) {
         @try {
