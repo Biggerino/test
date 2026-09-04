@@ -8,8 +8,7 @@ namespace {
 
 const NSUInteger kMaxLines = 400;
 
-BOOL PADiscoveryMatch(NSString *name) {
-    static NSArray<NSString *> *keywords;
+BOOL PADiscoveryMatch(NSString *name) {    static NSArray<NSString *> *keywords;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         keywords = @[
@@ -33,6 +32,85 @@ BOOL PADiscoveryMatch(NSString *name) {
 }
 
 }  // namespace
+
+// Auto-hook: for high-confidence verdict selectors (no-arg, BOOL/void
+// return, hostile keyword in the name), neutralize immediately and log.
+// Type encoding is checked first, so only provably compatible methods
+// are touched. Runs on the background queue; method_setImplementation
+// is thread-safe for distinct methods.
+static BOOL PAAutoHookVerdict(Class target, NSString *className,
+                              NSString *selName, Method method) {
+    const char *encoding = method_getTypeEncoding(method);
+    if (!encoding) return NO;
+    // No-arg methods only: encodings look like "B@:" / "c@:" / "v@:".
+    if (strlen(encoding) < 3 || encoding[1] != '@' || encoding[2] != ':') {
+        return NO;
+    }
+    if (strlen(encoding) > 4) return NO;
+    const char ret = encoding[0];
+    const BOOL isBool = (ret == 'B' || ret == 'c');
+    const BOOL isVoid = (ret == 'v');
+    if (!isBool && !isVoid) return NO;
+
+    NSString *lower = selName.lowercaseString;
+    NSArray<NSString *> *badWords = @[
+        @"jailbreak", @"jailbroken", @"tamper", @"fraud", @"cheat",
+        @"hack", @"debugger", @"cydia", @"substrate", @"pirat",
+        @"crack", @"untrust", @" unofficial",
+    ];
+    NSArray<NSString *> *goodWords = @[
+        @"appstore", @"app_store", @"genuine", @"legit", @"official",
+    ];
+    BOOL hostile = NO;
+    for (NSString *w in badWords) {
+        if ([lower containsString:w]) { hostile = YES; break; }
+    }
+    BOOL benign = NO;
+    for (NSString *w in goodWords) {
+        if ([lower containsString:w]) { benign = YES; break; }
+    }
+
+    @try {
+        if (isBool && hostile &&
+            ([lower hasPrefix:@"is"] || [lower hasPrefix:@"can"] ||
+             [lower hasPrefix:@"has"] || [lower hasPrefix:@"should"] ||
+             [lower containsString:@"detect"])) {
+            IMP stub = imp_implementationWithBlock(^BOOL(id _self) {
+                (void)_self;
+                return NO;
+            });
+            method_setImplementation(method, stub);
+            PALog(@"autohook -[%@ %@] -> NO", className, selName);
+            return YES;
+        }
+        if (isBool && benign &&
+            ([lower hasPrefix:@"is"] || [lower hasPrefix:@"can"] ||
+             [lower hasPrefix:@"has"])) {
+            IMP stub = imp_implementationWithBlock(^BOOL(id _self) {
+                (void)_self;
+                return YES;
+            });
+            method_setImplementation(method, stub);
+            PALog(@"autohook -[%@ %@] -> YES", className, selName);
+            return YES;
+        }
+        if (isVoid && hostile &&
+            ([lower hasPrefix:@"set"] || [lower hasPrefix:@"enable"] ||
+             [lower hasPrefix:@"disable"] || [lower hasPrefix:@"check"] ||
+             [lower hasPrefix:@"verify"] || [lower hasPrefix:@"report"] ||
+             [lower hasPrefix:@"perform"])) {
+            IMP stub = imp_implementationWithBlock(^(id _self) {
+                (void)_self;
+            });
+            method_setImplementation(method, stub);
+            PALog(@"autohook -[%@ %@] -> noop", className, selName);
+            return YES;
+        }
+    } @catch (NSException *e) {
+        PALog(@"autohook -[%@ %@] exception %@", className, selName, e);
+    }
+    return NO;
+}
 
 @implementation PADiscovery
 
@@ -109,15 +187,23 @@ BOOL PADiscoveryMatch(NSString *name) {
                         PALog(@"discover %@[%@ %@]", pass == 0 ? @"-" : @"+",
                               className, selName);
                         lines++;
+                        // Instance methods only (pass 0): try immediate
+                        // neutralization; class methods are logged for
+                        // the next targeted build.
+                        if (pass == 0) {
+                            PAAutoHookVerdict(target, className, selName,
+                                              methods[mi]);
+                        }
                     }
                 }
                 free(methods);
             }
-            free(classes);
-            PALog(@"stage=discovery result=done lines=%lu", (unsigned long)lines);
-        } @catch (NSException *e) {
-            PALog(@"stage=discovery result=exception %@", e);
         }
+        free(classes);
+        PALog(@"stage=discovery result=done lines=%lu", (unsigned long)lines);
+    } @catch (NSException *e) {
+        PALog(@"stage=discovery result=exception %@", e);
     }
+}
 
 @end

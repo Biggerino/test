@@ -127,7 +127,7 @@ static void PAAutoPilotTick(int remaining) {
         PALog(@"autopilot stop: logged in");
         return;
     }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
         @try {
             UIWindow *window = PAFindBestWindow();

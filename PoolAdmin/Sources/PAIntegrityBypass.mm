@@ -93,6 +93,57 @@ static void PA_presentVC(id self, SEL _cmd, UIViewController *vc, BOOL anim, voi
 // Hook the ObjC-level forceClose / exit paths, not the C exit() function.
 // The game calls exit() through an ObjC method chain that we can intercept.
 
+#pragma mark - Jailbreak filesystem cloak
+
+// fileExistsAtPath: lies about classic jailbreak artifacts only.
+// Everything else passes through untouched.
+static BOOL PAIsJailbreakPath(NSString *path) {
+    if (![path isKindOfClass:NSString.class] || !path.length) return NO;
+    static NSArray<NSString *> *markers;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        markers = @[
+            @"/Applications/Cydia.app",
+            @"/Applications/Sileo.app",
+            @"/Applications/Zebra.app",
+            @"/bin/bash", @"/bin/sh", @"/usr/sbin/sshd",
+            @"/etc/apt", @"/private/var/lib/apt",
+            @"/Library/MobileSubstrate",
+            @"/usr/lib/libsubstrate",
+            @"/usr/lib/substitute",
+            @"cydia", @"sileo", @"zebra",
+        ];
+    });
+    NSString *lower = path.lowercaseString;
+    for (NSString *m in markers) {
+        if ([lower containsString:m.lowercaseString]) return YES;
+    }
+    return NO;
+}
+
+static IMP sOriginal_fileExists = NULL;
+static IMP sOriginal_fileExistsDir = NULL;
+
+static BOOL PA_fileExists(id self, SEL _cmd, NSString *path) {
+    if (PAIsJailbreakPath(path)) return NO;
+    if (sOriginal_fileExists) {
+        return ((BOOL(*)(id, SEL, NSString *))sOriginal_fileExists)(self, _cmd, path);
+    }
+    return NO;
+}
+
+static BOOL PA_fileExistsDir(id self, SEL _cmd, NSString *path, BOOL *isDir) {
+    if (PAIsJailbreakPath(path)) {
+        if (isDir) *isDir = NO;
+        return NO;
+    }
+    if (sOriginal_fileExistsDir) {
+        return ((BOOL(*)(id, SEL, NSString *, BOOL *))sOriginal_fileExistsDir)(
+            self, _cmd, path, isDir);
+    }
+    return NO;
+}
+
 #pragma mark - Install
 
 // Known 8 Ball Pool classes that implement integrity/jailbreak methods
@@ -156,6 +207,26 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
             }
         } @catch (NSException *e) {
             NSLog(@"[PoolAdmin] Phase 1 exception: %@", e);
+        }
+
+        // Phase 1b: cloak jailbreak filesystem artifacts. Runs with the
+        // rest of phase 1 (post-launch, main thread).
+        @try {
+            Method a = class_getInstanceMethod([NSFileManager class],
+                                               @selector(fileExistsAtPath:));
+            if (a) {
+                sOriginal_fileExists = method_getImplementation(a);
+                method_setImplementation(a, (IMP)PA_fileExists);
+            }
+            Method b = class_getInstanceMethod(
+                [NSFileManager class],
+                @selector(fileExistsAtPath:isDirectory:));
+            if (b) {
+                sOriginal_fileExistsDir = method_getImplementation(b);
+                method_setImplementation(b, (IMP)PA_fileExistsDir);
+            }
+        } @catch (NSException *e) {
+            NSLog(@"[PoolAdmin] FS cloak exception: %@", e);
         }
 
         // Phase 2: Immediate — install the alert suppression hook.

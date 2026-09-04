@@ -347,8 +347,7 @@ static void PA_abort(void) {
     PALog(@"guard abort() swallowed — staying alive");
 }
 
-static int PA_kill(pid_t pid, int sig) {
-    static int (*real_kill)(pid_t, int) = NULL;
+static int PA_kill(pid_t pid, int sig) {    static int (*real_kill)(pid_t, int) = NULL;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         real_kill = (int (*)(pid_t, int))dlsym(RTLD_NEXT, "kill");
@@ -359,6 +358,24 @@ static int PA_kill(pid_t pid, int sig) {
         return 0;
     }
     if (real_kill) return real_kill(pid, sig);
+    return -1;
+}
+
+// PT_DENY_ATTACH (31) is how a process refuses debuggers; anti-tamper
+// inverts it (fork+attach, or direct call) to detect analysis. Pretend
+// success without engaging so neither direction learns anything.
+static int PA_ptrace(int request, pid_t pid, void *addr, int data) {
+    static int (*real_ptrace)(int, pid_t, void *, int) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        real_ptrace =
+            (int (*)(int, pid_t, void *, int))dlsym(RTLD_NEXT, "ptrace");
+    });
+    if (request == 31) {
+        PALog(@"guard ptrace(DENY_ATTACH) swallowed");
+        return 0;
+    }
+    if (real_ptrace) return real_ptrace(request, pid, addr, data);
     return -1;
 }
 
@@ -375,6 +392,7 @@ static int PA_kill(pid_t pid, int sig) {
             PARebindAll("_exit", (void *)&PA__exit);
             PARebindAll("abort", (void *)&PA_abort);
             PARebindAll("kill", (void *)&PA_kill);
+            PARebindAll("ptrace", (void *)&PA_ptrace);
             PALog(@"stage=exitguard result=ok");
         } @catch (NSException *e) {
             PALog(@"stage=exitguard result=exception %@", e);
