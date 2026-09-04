@@ -5,6 +5,7 @@
 #import "PAOverlayView.h"
 #import "PAAdminPanel.h"
 #import "PARuntimeBridge.h"
+#import "PALogger.h"
 
 // Returns YES once the game has a live account (UserInfo initialized).
 // The tweak stays completely invisible until then: no button, no panel,
@@ -71,14 +72,14 @@ static UIWindow *PAFindBestWindow(void) {
             }
         } @catch (NSException *e) {}
     } @catch (NSException *e) {
-        NSLog(@"[PoolAdmin] window lookup exception: %@", e);
+        PALog(@"window lookup exception: %@", e);
     }
     return nil;
 }
 
 static void PAAttachViewsToWindow(int retryCount) {
     if (retryCount <= 0) {
-        NSLog(@"[PoolAdmin] stage=attach result=no-window");
+        PALog(@"stage=attach result=no-window");
         return;
     }
 
@@ -101,7 +102,7 @@ static void PAAttachViewsToWindow(int retryCount) {
     // Stay invisible until the account is live. Keeps polling (up to the
     // retry budget) through login screens, loading, and menu.
     if (!PAAccountReady()) {
-        NSLog(@"[PoolAdmin] stage=attach result=waiting-for-login");
+        PALog(@"stage=attach result=waiting-for-login");
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
             PAAttachViewsToWindow(retryCount - 1);
@@ -113,25 +114,25 @@ static void PAAttachViewsToWindow(int retryCount) {
     if (PAFlagEnabled(@"PAEnableOverlay")) {
         @try {
             [[PAOverlayView shared] attachToWindow:window];
-            NSLog(@"[PoolAdmin] stage=overlay result=ok");
+            PALog(@"stage=overlay result=ok");
         } @catch (NSException *exception) {
-            NSLog(@"[PoolAdmin] stage=overlay result=exception %@", exception);
+            PALog(@"stage=overlay result=exception %@", exception);
         }
     } else {
-        NSLog(@"[PoolAdmin] stage=overlay result=disabled");
+        PALog(@"stage=overlay result=disabled");
     }
 
     if (PAFlagEnabled(@"PAEnablePanel")) {
         @try {
             [[PAAdminPanel shared] attachToWindow:window];
-            NSLog(@"[PoolAdmin] stage=panel result=ok");
+            PALog(@"stage=panel result=ok");
         } @catch (NSException *exception) {
-            NSLog(@"[PoolAdmin] stage=panel result=exception %@", exception);
+            PALog(@"stage=panel result=exception %@", exception);
         }
     } else {
-        NSLog(@"[PoolAdmin] stage=panel result=disabled");
+        PALog(@"stage=panel result=disabled");
     }
-    NSLog(@"[PoolAdmin] stage=attach result=done");
+    PALog(@"stage=attach result=done");
 }
 
 // Re-attach when a new window becomes visible. Attach methods are idempotent.
@@ -162,36 +163,37 @@ static void PAInstallWindowObserver(void) {
 }
 
 static void PABootFromNotification(void) {
-    NSLog(@"[PoolAdmin] stage=boot begin");
+    PALog(@"stage=boot begin");
+    PAStartHeartbeat();
 
     // Hide our image from dyld/NSBundle enumeration FIRST, before any
     // other hook runs — the game's local checks scan for foreign images.
     @try {
         [PAImageHider install];
     } @catch (NSException *exception) {
-        NSLog(@"[PoolAdmin] stage=hider result=exception %@", exception);
+        PALog(@"stage=hider result=exception %@", exception);
     }
 
     if (PAFlagEnabled(@"PAEnableIntegrityBypass")) {
         @try {
             [PAIntegrityBypass install];
-            NSLog(@"[PoolAdmin] stage=bypass result=ok");
+            PALog(@"stage=bypass result=ok");
         } @catch (NSException *exception) {
-            NSLog(@"[PoolAdmin] stage=bypass result=exception %@", exception);
+            PALog(@"stage=bypass result=exception %@", exception);
         }
     } else {
-        NSLog(@"[PoolAdmin] stage=bypass result=disabled");
+        PALog(@"stage=bypass result=disabled");
     }
 
     if (PAFlagEnabled(@"PAEnableStoreHooks")) {
         @try {
             [PAStoreInterceptor install];
-            NSLog(@"[PoolAdmin] stage=store result=ok");
+            PALog(@"stage=store result=ok");
         } @catch (NSException *exception) {
-            NSLog(@"[PoolAdmin] stage=store result=exception %@", exception);
+            PALog(@"stage=store result=exception %@", exception);
         }
     } else {
-        NSLog(@"[PoolAdmin] stage=store result=disabled");
+        PALog(@"stage=store result=disabled");
     }
 
     PAInstallWindowObserver();
@@ -207,7 +209,7 @@ static void PABootFromNotification(void) {
 // observer using only stringly-typed API names available since iOS 2.
 // No UIScene symbols, no UIKit class references, no view code here.
 static void __attribute__((constructor)) PAPoolAdminInit(void) {
-    NSLog(@"[PoolAdmin] stage=init begin");
+    PALog(@"stage=init begin");
     @try {
         __block id finishObserver = nil;
         void (^bootOnce)(void) = ^{
@@ -247,8 +249,8 @@ static void __attribute__((constructor)) PAPoolAdminInit(void) {
                 bootOnce();
             });
         });
-        NSLog(@"[PoolAdmin] stage=init result=ok");
+        PALog(@"stage=init result=ok");
     } @catch (NSException *exception) {
-        NSLog(@"[PoolAdmin] stage=init result=exception %@", exception);
+        PALog(@"stage=init result=exception %@", exception);
     }
 }
