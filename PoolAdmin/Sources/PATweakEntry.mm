@@ -208,6 +208,27 @@ static void PABootFromNotification(void) {
     }
 
     PAInstallWindowObserver();
+    // Lifecycle markers: distinguish user/OS backgrounding and orderly
+    // termination from sudden silent death (direct-syscall exit leaves
+    // no crash log, but it also never posts WillTerminate).
+    @try {
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:@"UIApplicationDidEnterBackgroundNotification"
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
+            (void)note;
+            PALog(@"lifecycle did-enter-background");
+        }];
+        [NSNotificationCenter.defaultCenter
+            addObserverForName:@"UIApplicationWillTerminateNotification"
+                        object:nil
+                         queue:NSOperationQueue.mainQueue
+                    usingBlock:^(NSNotification *note) {
+            (void)note;
+            PALog(@"lifecycle will-terminate");
+        }];
+    } @catch (NSException *e) {}
     // Delay lets the game finish creating its window. Large retry budget:
     // the UI stays hidden until login completes, however long that takes.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
