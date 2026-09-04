@@ -3,6 +3,8 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
+#include <cmath>
+
 namespace {
 
 typedef id (*PAIdSend0)(id, SEL);
@@ -88,7 +90,9 @@ static BOOL Solve3x3(const double matrix[3][3], const double vector[3], double r
         if (fabs(augmented[pivot][column]) < 1e-9) return NO;
         if (pivot != column) {
             for (NSInteger k = column; k < 4; k++) {
-                std::swap(augmented[pivot][k], augmented[column][k]);
+                const double tmp = augmented[pivot][k];
+                augmented[pivot][k] = augmented[column][k];
+                augmented[column][k] = tmp;
             }
         }
         const double divisor = augmented[column][column];
