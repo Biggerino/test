@@ -7,14 +7,18 @@
 #import "PARuntimeBridge.h"
 #import "PALogger.h"
 
-// Returns YES once the game has a live account (UserInfo initialized).
+// Returns YES once the game has a LIVE account (a real user id).
+// NOTE: the UserInfo singleton exists from launch with no user, so `ready`
+// alone is true on the Terms screen — gate on an actual user id instead.
 // The tweak stays completely invisible until then: no button, no panel,
 // no overlay. Integrity/store hooks still install at boot (they must run
 // before login to suppress the tamper popup).
 static BOOL PAAccountReady(void) {
     @try {
         NSDictionary *summary = [PARuntimeBridge.shared playerSummary];
-        return [summary[@"ready"] boolValue];
+        id userId = summary[@"userId"];
+        return [userId isKindOfClass:NSString.class] &&
+               [(NSString *)userId length] > 0;
     } @catch (NSException *e) {
         return NO;
     }
@@ -172,6 +176,13 @@ static void PABootFromNotification(void) {
         [PAImageHider install];
     } @catch (NSException *exception) {
         PALog(@"stage=hider result=exception %@", exception);
+    }
+
+    // Swallow the delayed-kill suicide calls (exit/_exit/abort/kill-self).
+    @try {
+        [PAExitGuard install];
+    } @catch (NSException *exception) {
+        PALog(@"stage=exitguard result=exception %@", exception);
     }
 
     if (PAFlagEnabled(@"PAEnableIntegrityBypass")) {

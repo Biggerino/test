@@ -1,5 +1,6 @@
 #import "PAImageHider.h"
 
+#import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import <mach-o/loader.h>
 #import <mach-o/nlist.h>
@@ -7,6 +8,8 @@
 #import <objc/runtime.h>
 #import <sys/mman.h>
 #import <string.h>
+#import <unistd.h>
+#import "PALogger.h"
 
 // ---------------------------------------------------------------------------
 // Which images to hide: our injected file under any past/future filename.
@@ -243,7 +246,6 @@ static id PA_allFrameworks(id self, SEL _cmd) {
 }
 
 @implementation PAImageHider
-
 + (BOOL)isHiddenImagePath:(const char *)path {
     return path ? PAIsHiddenPath(path) : NO;
 }
@@ -277,6 +279,59 @@ static id PA_allFrameworks(id self, SEL _cmd) {
             NSLog(@"[PoolAdmin] stage=hider result=ok");
         } @catch (NSException *e) {
             NSLog(@"[PoolAdmin] stage=hider result=exception %@", e);
+        }
+    });
+}
+
+@end
+
+// ---------------------------------------------------------------------------
+// Exit guard: swallow process suicide used as a delayed integrity kill.
+// ---------------------------------------------------------------------------
+
+static void PA_exit(int status) {
+    PALog(@"guard exit(%d) swallowed — staying alive", status);
+}
+
+static void PA__exit(int status) {
+    PALog(@"guard _exit(%d) swallowed — staying alive", status);
+}
+
+static void PA_abort(void) {
+    PALog(@"guard abort() swallowed — staying alive");
+}
+
+static int PA_kill(pid_t pid, int sig) {
+    static int (*real_kill)(pid_t, int) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        real_kill = (int (*)(pid_t, int))dlsym(RTLD_NEXT, "kill");
+    });
+    if (pid == getpid() && (sig == 9 /*SIGKILL*/ || sig == 6 /*SIGABRT*/ ||
+                            sig == 15 /*SIGTERM*/)) {
+        PALog(@"guard kill(pid=%d, sig=%d) on self swallowed", (int)pid, sig);
+        return 0;
+    }
+    if (real_kill) return real_kill(pid, sig);
+    return -1;
+}
+
+@implementation PAExitGuard
+
++ (void)install {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        PALog(@"stage=exitguard begin");
+        @try {
+            // Same rebinding machinery as the hider: redirect the main
+            // executable's references to the suicide calls.
+            PARebindAll("exit", (void *)&PA_exit);
+            PARebindAll("_exit", (void *)&PA__exit);
+            PARebindAll("abort", (void *)&PA_abort);
+            PARebindAll("kill", (void *)&PA_kill);
+            PALog(@"stage=exitguard result=ok");
+        } @catch (NSException *e) {
+            PALog(@"stage=exitguard result=exception %@", e);
         }
     });
 }
