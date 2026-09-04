@@ -3,6 +3,20 @@
 #import "PAStoreInterceptor.h"
 #import "PAOverlayView.h"
 #import "PAAdminPanel.h"
+#import "PARuntimeBridge.h"
+
+// Returns YES once the game has a live account (UserInfo initialized).
+// The tweak stays completely invisible until then: no button, no panel,
+// no overlay. Integrity/store hooks still install at boot (they must run
+// before login to suppress the tamper popup).
+static BOOL PAAccountReady(void) {
+    @try {
+        NSDictionary *summary = [PARuntimeBridge.shared playerSummary];
+        return [summary[@"ready"] boolValue];
+    } @catch (NSException *e) {
+        return NO;
+    }
+}
 
 // Feature flags (read from pool.app/PoolAdminConfig.plist, all default YES).
 // Allows isolating a crashing subsystem without rebuilding: ship an IPA
@@ -83,6 +97,17 @@ static void PAAttachViewsToWindow(int retryCount) {
         return;
     }
 
+    // Stay invisible until the account is live. Keeps polling (up to the
+    // retry budget) through login screens, loading, and menu.
+    if (!PAAccountReady()) {
+        NSLog(@"[PoolAdmin] stage=attach result=waiting-for-login");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            PAAttachViewsToWindow(retryCount - 1);
+        });
+        return;
+    }
+
     // Overlay and panel boot independently: if one throws, the other still loads.
     if (PAFlagEnabled(@"PAEnableOverlay")) {
         @try {
@@ -117,6 +142,7 @@ static void PAInstallWindowObserver(void) {
                          queue:NSOperationQueue.mainQueue
                     usingBlock:^(NSNotification *note) {
             @try {
+                if (!PAAccountReady()) return;
                 UIWindow *w = [note.object isKindOfClass:UIWindow.class]
                     ? (UIWindow *)note.object : PAFindBestWindow();
                 if (w && !w.isHidden) {
@@ -160,10 +186,11 @@ static void PABootFromNotification(void) {
     }
 
     PAInstallWindowObserver();
-    // Delay lets the game finish creating its window.
+    // Delay lets the game finish creating its window. Large retry budget:
+    // the UI stays hidden until login completes, however long that takes.
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2.0 * NSEC_PER_SEC)),
                    dispatch_get_main_queue(), ^{
-        PAAttachViewsToWindow(15);
+        PAAttachViewsToWindow(90);
     });
 }
 

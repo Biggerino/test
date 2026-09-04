@@ -94,9 +94,14 @@ static NSString *FormatLargeNumber(uint64_t val) {
 @interface PAToggleButton : UIButton
 @property(nonatomic) CGPoint touchStart;
 @property(nonatomic) BOOL isDragging;
+@property(nonatomic, strong, readonly) UIPanGestureRecognizer *panRecognizer;
 @end
 
-@implementation PAToggleButton
+@implementation PAToggleButton {
+    UIPanGestureRecognizer *_panRecognizer;
+}
+
+- (UIPanGestureRecognizer *)panRecognizer { return _panRecognizer; }
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
@@ -112,8 +117,8 @@ static NSString *FormatLargeNumber(uint64_t val) {
         [self setTitle:@"🎱" forState:UIControlStateNormal];
         self.titleLabel.font = [UIFont systemFontOfSize:22];
 
-        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
-        [self addGestureRecognizer:pan];
+        _panRecognizer = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [self addGestureRecognizer:_panRecognizer];
     }
     return self;
 }
@@ -290,25 +295,19 @@ static NSString *FormatLargeNumber(uint64_t val) {
                                            safe.top + 130);
     // Keep the button above the trajectory overlay (which sits at back).
     self.toggleButton.layer.zPosition = 1000;
-    [self.toggleButton addTarget:self action:@selector(togglePanel) forControlEvents:UIControlEventTouchUpInside];
+    // Tap-vs-drag disambiguation: a drag that moves the button must NEVER
+    // open the panel. TouchUpInside can't tell them apart (it fires after a
+    // drag), so the tap is a gesture that only fires when the pan fails.
+    // Do NOT add a TouchUpInside target here.
+    UITapGestureRecognizer *buttonTap =
+        [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(togglePanel)];
+    [buttonTap requireGestureRecognizerToFail:self.toggleButton.panRecognizer];
+    [self.toggleButton addGestureRecognizer:buttonTap];
     [window addSubview:self.toggleButton];
 
     // Panel Container
     [self buildPanelInWindow:window];
     self.panelContainer.layer.zPosition = 999;
-
-    // Triple-tap gesture (guard against adding twice to same window).
-    BOOL hasTripleTap = NO;
-    for (UIGestureRecognizer *g in window.gestureRecognizers) {
-        if ([g isKindOfClass:UITapGestureRecognizer.class] &&
-            ((UITapGestureRecognizer *)g).numberOfTapsRequired == 3) { hasTripleTap = YES; break; }
-    }
-    if (!hasTripleTap) {
-        UITapGestureRecognizer *tripleTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(togglePanel)];
-        tripleTap.numberOfTapsRequired = 3;
-        tripleTap.cancelsTouchesInView = NO;
-        [window addGestureRecognizer:tripleTap];
-    }
 
     // Auto-refresh timer
     if (!self.refreshTimer) {
@@ -557,6 +556,19 @@ static NSString *FormatLargeNumber(uint64_t val) {
     self.customAmountField.textAlignment = NSTextAlignmentCenter;
     self.customAmountField.delegate = self;
     self.customAmountField.translatesAutoresizingMaskIntoConstraints = NO;
+    // Number pad has no return key — without this the keyboard traps all
+    // touches (including game touches behind the panel).
+    {
+        UIToolbar *bar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, 0, 44)];
+        UIBarButtonItem *flex =
+            [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace
+                                                         target:nil action:nil];
+        UIBarButtonItem *done =
+            [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone
+                                                         target:self action:@selector(dismissKeyboard)];
+        bar.items = @[flex, done];
+        self.customAmountField.inputAccessoryView = bar;
+    }
     [amountRow addSubview:self.customAmountField];
 
     [NSLayoutConstraint activateConstraints:@[
@@ -958,16 +970,23 @@ static NSString *FormatLargeNumber(uint64_t val) {
 }
 
 - (void)grantKind:(NSString *)kind amount:(uint64_t)amount productId:(NSString * _Nullable)productId {
-    NSMutableDictionary *grant = [@{ @"kind": kind, @"amount": @(amount) } mutableCopy];
-    if (productId.length) grant[@"productId"] = productId;
+    @try {
+        NSMutableDictionary *grant = [@{ @"kind": kind, @"amount": @(amount) } mutableCopy];
+        if (productId.length) grant[@"productId"] = productId;
 
-    self.grantStatusLabel.text = [NSString stringWithFormat:@"Applying %@ …", kind];
-    self.grantStatusLabel.textColor = PATintColor();
+        self.grantStatusLabel.text = [NSString stringWithFormat:@"Applying %@ …", kind];
+        self.grantStatusLabel.textColor = PATintColor();
 
-    [[PAGrantService shared] grantItems:@[grant] completion:^(BOOL success, NSString *message, NSDictionary *response) {
-        self.grantStatusLabel.text = message;
-        self.grantStatusLabel.textColor = success ? PASuccessColor() : PADangerColor();
-    }];
+        [[PAGrantService shared] grantItems:@[grant] completion:^(BOOL success, NSString *message, NSDictionary *response) {
+            @try {
+                self.grantStatusLabel.text = message;
+                self.grantStatusLabel.textColor = success ? PASuccessColor() : PADangerColor();
+            } @catch (NSException *e) {}
+        }];
+    } @catch (NSException *e) {
+        self.grantStatusLabel.text = @"Grant failed (exception)";
+        self.grantStatusLabel.textColor = PADangerColor();
+    }
 }
 
 - (void)grantCoins      { [self grantKind:@"coins"      amount:[self currentAmount] productId:nil]; }
@@ -977,6 +996,15 @@ static NSString *FormatLargeNumber(uint64_t val) {
 - (void)grantPoolPoints { [self grantKind:@"pool_points" amount:[self currentAmount] productId:@"38156"]; }
 
 - (void)grantMaxEverything {
+    @try {
+        [self grantMaxEverythingUnsafe];
+    } @catch (NSException *e) {
+        self.grantStatusLabel.text = @"MAX failed (exception)";
+        self.grantStatusLabel.textColor = PADangerColor();
+    }
+}
+
+- (void)grantMaxEverythingUnsafe {
     NSArray *grants = @[
         @{ @"kind": @"coins",       @"amount": @(999999999) },
         @{ @"kind": @"cash",        @"amount": @(999999) },
@@ -1001,22 +1029,29 @@ static NSString *FormatLargeNumber(uint64_t val) {
 }
 
 - (void)applyPreset:(UIButton *)sender {
-    NSArray *presets = PAGrantService.shared.presets;
-    NSUInteger index = (NSUInteger)sender.tag;
-    if (index >= presets.count) return;
+    @try {
+        NSArray *presets = PAGrantService.shared.presets;
+        NSUInteger index = (NSUInteger)sender.tag;
+        if (index >= presets.count) return;
 
-    NSDictionary *preset = presets[index];
-    NSArray *grants = preset[@"grants"];
-    if (![grants isKindOfClass:NSArray.class]) return;
+        NSDictionary *preset = presets[index];
+        NSArray *grants = preset[@"grants"];
+        if (![grants isKindOfClass:NSArray.class]) return;
 
-    NSString *title = preset[@"title"] ?: @"Preset";
-    self.grantStatusLabel.text = [NSString stringWithFormat:@"Applying %@ …", title];
-    self.grantStatusLabel.textColor = PATintColor();
+        NSString *title = preset[@"title"] ?: @"Preset";
+        self.grantStatusLabel.text = [NSString stringWithFormat:@"Applying %@ …", title];
+        self.grantStatusLabel.textColor = PATintColor();
 
-    [[PAGrantService shared] grantItems:grants completion:^(BOOL success, NSString *message, NSDictionary *response) {
-        self.grantStatusLabel.text = success ? [NSString stringWithFormat:@"✅ %@ applied!", title] : message;
-        self.grantStatusLabel.textColor = success ? PASuccessColor() : PADangerColor();
-    }];
+        [[PAGrantService shared] grantItems:grants completion:^(BOOL success, NSString *message, NSDictionary *response) {
+            @try {
+                self.grantStatusLabel.text = success ? [NSString stringWithFormat:@"✅ %@ applied!", title] : message;
+                self.grantStatusLabel.textColor = success ? PASuccessColor() : PADangerColor();
+            } @catch (NSException *e) {}
+        }];
+    } @catch (NSException *e) {
+        self.grantStatusLabel.text = @"Preset failed (exception)";
+        self.grantStatusLabel.textColor = PADangerColor();
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1089,21 +1124,33 @@ static NSString *FormatLargeNumber(uint64_t val) {
 // ---------------------------------------------------------------------------
 
 - (void)applyInfiniteGuidelines {
-    [PARuntimeBridge.shared setGuidelineLength:9999.0];
-    self.cheatStatusLabel.text = @"📏 Infinite guideline set!";
-    self.cheatStatusLabel.textColor = PASuccessColor();
+    @try {
+        [PARuntimeBridge.shared setGuidelineLength:9999.0];
+        self.cheatStatusLabel.text = @"📏 Infinite guideline set!";
+        self.cheatStatusLabel.textColor = PASuccessColor();
+    } @catch (NSException *e) {
+        self.cheatStatusLabel.text = @"Failed (exception)";
+        self.cheatStatusLabel.textColor = PADangerColor();
+    }
 }
 
 - (void)hideNativeGuidelinesToggled:(UISwitch *)sender {
-    [PARuntimeBridge.shared setNativeGuidelinesHidden:sender.isOn];
-    self.cheatStatusLabel.text = sender.isOn ? @"Native lines hidden" : @"Native lines visible";
-    self.cheatStatusLabel.textColor = PATintColor();
+    @try {
+        [PARuntimeBridge.shared setNativeGuidelinesHidden:sender.isOn];
+        self.cheatStatusLabel.text = sender.isOn ? @"Native lines hidden" : @"Native lines visible";
+        self.cheatStatusLabel.textColor = PATintColor();
+    } @catch (NSException *e) {}
 }
 
 - (void)applyMaxPower {
-    [PARuntimeBridge.shared setPower:1.0];
-    self.cheatStatusLabel.text = @"⚡ Max shot power applied!";
-    self.cheatStatusLabel.textColor = PASuccessColor();
+    @try {
+        [PARuntimeBridge.shared setPower:1.0];
+        self.cheatStatusLabel.text = @"⚡ Max shot power applied!";
+        self.cheatStatusLabel.textColor = PASuccessColor();
+    } @catch (NSException *e) {
+        self.cheatStatusLabel.text = @"Failed (exception)";
+        self.cheatStatusLabel.textColor = PADangerColor();
+    }
 }
 
 - (void)unlockLegendaryCues {
@@ -1221,11 +1268,22 @@ static NSString *FormatLargeNumber(uint64_t val) {
 }
 
 - (void)copyAuditLog {
-    NSString *json = [PAGrantService.shared exportAuditJSON];
-    [UIPasteboard generalPasteboard].string = json;
+    @try {
+        NSString *json = [PAGrantService.shared exportAuditJSON];
+        [UIPasteboard generalPasteboard].string = json;
 
-    self.grantStatusLabel.text = @"📋 Audit log copied!";
-    self.grantStatusLabel.textColor = PASuccessColor();
+        self.grantStatusLabel.text = @"📋 Audit log copied!";
+        self.grantStatusLabel.textColor = PASuccessColor();
+    } @catch (NSException *e) {
+        self.grantStatusLabel.text = @"Copy failed";
+        self.grantStatusLabel.textColor = PADangerColor();
+    }
+}
+
+- (void)dismissKeyboard {
+    @try {
+        [self.customAmountField resignFirstResponder];
+    } @catch (NSException *e) {}
 }
 
 // ---------------------------------------------------------------------------
