@@ -121,7 +121,145 @@ static UIButton *PAFindButton(UIView *view, NSArray<NSString *> *titles) {
     return nil;
 }
 
+// Auto-pilot: before login, poll for the onboarding buttons (Terms
+// "Accept", "Play as Guest") and tap the first visible one. Beats the
+// freeze window without the user racing it. Searches BOTH UIKit AND
+// Cocos2d nodes (the game draws the Terms overlay in Cocos2d).
+static UIButton *PAFindButtonUIKit(UIView *view, NSArray<NSString *> *titles) {
+    @try {
+        if ([view isKindOfClass:UIButton.class]) {
+            UIButton *button = (UIButton *)view;
+            NSString *title = button.currentTitle ?: @"";
+            NSString *label = button.accessibilityLabel ?: @"";
+            NSString *both = [NSString stringWithFormat:@"%@ %@", title, label];
+            for (NSString *want in titles) {
+                if ([both localizedCaseInsensitiveContainsString:want]) {
+                    return button;
+                }
+            }
+        }
+        for (UIView *sub in view.subviews) {
+            UIButton *found = PAFindButtonUIKit(sub, titles);
+            if (found) return found;
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+// Cocos2d button search: walks CCNode tree looking for CCMenuItemLabel /
+// CCMenuItemImage / CCControlButton with matching label text.
+static id PACocosFindButton(id root, NSArray<NSString *> *titles) {
+    @try {
+        Class ccNode = NSClassFromString(@"CCNode");
+        Class ccMenuItem = NSClassFromString(@"CCMenuItem");
+        Class ccLabel = NSClassFromString(@"CCLabelTTF");
+        Class ccLabelBMFont = NSClassFromString(@"CCLabelBMFont");
+        if (!ccNode) return nil;
+
+        // Helper to get label text from a node
+        NSString * (^nodeText)(id node) = ^NSString *(id n) {
+            @try {
+                if ([n isKindOfClass:ccLabel]) {
+                    return [n string];
+                }
+                if ([n isKindOfClass:ccLabelBMFont]) {
+                    return [n string];
+                }
+                if ([n isKindOfClass:ccMenuItem]) {
+                    // Try to get label child
+                    if ([n respondsToSelector:@selector(label)]) {
+                        id label = ((id(*)(id,SEL))objc_msgSend)(n, @selector(label));
+                        if ([label isKindOfClass:ccLabel] || [label isKindOfClass:ccLabelBMFont]) {
+                            return [label string];
+                        }
+                    }
+                }
+            } @catch (NSException *e) {}
+            return @"";
+        };
+
+        // Check this node
+        NSString *text = nodeText(root);
+        if (text.length > 0) {
+            NSString *lower = text.lowercaseString;
+            for (NSString *want in titles) {
+                if ([lower localizedCaseInsensitiveContainsString:want]) {
+                    return root;
+                }
+            }
+        }
+
+        // Recurse children
+        if ([root respondsToSelector:@selector(children)]) {
+            id children = ((id(*)(id,SEL))objc_msgSend)(root, @selector(children));
+            if ([children isKindOfClass:NSArray.class]) {
+                for (id child in children) {
+                    id found = PACocosFindButton(child, titles);
+                    if (found) return found;
+                }
+            }
+        }
+    } @catch (NSException *e) {}
+    return nil;
+}
+
 static void PAAutoPilotTick(int remaining) {
+    if (remaining <= 0) return;
+    if (PAAccountReady()) {
+        PALog(@"autopilot stop: logged in");
+        return;
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                   dispatch_get_main_queue(), ^{
+        @try {
+            UIWindow *window = PAFindBestWindow();
+            // First try UIKit buttons
+            UIButton *button = window ? PAFindButtonUIKit(
+                window, @[@"Accept", @"Play as Guest", @"Continue"]) : nil;
+            // If not found, try Cocos2d nodes
+            id cocosBtn = nil;
+            if (!button && window) {
+                id root = nil;
+                if ([window respondsToSelector:@selector(rootViewController)]) {
+                    id vc = [window rootViewController];
+                    if ([vc respondsToSelector:@selector(view)]) {
+                        root = [vc view];
+                    }
+                }
+                if (!root) root = window;
+                cocosBtn = PACocosFindButton(root, @[@"accept", @"play as guest", @"continue", @"agree"]);
+            }
+            id buttonToTap = button ?: cocosBtn;
+            if (buttonToTap) {
+                BOOL isUIKit = [buttonToTap isKindOfClass:[UIButton class]];
+                PALog(@"autopilot tapping '%@' (%@)",
+                      isUIKit ? ((UIButton *)buttonToTap).currentTitle ?: @"?" : @"cocos",
+                      isUIKit ? @"UIKit" : @"Cocos2d");
+                if (isUIKit) {
+                    [buttonToTap sendActionsForControlEvents:UIControlEventTouchUpInside];
+                } else {
+                    // Cocos2d: trigger the selector directly
+                    @try {
+                        SEL activate = NSSelectorFromString(@"activate");
+                        if ([buttonToTap respondsToSelector:activate]) {
+                            ((void(*)(id,SEL))objc_msgSend)(buttonToTap, activate);
+                        } else {
+                            SEL onEnter = NSSelectorFromString(@"onEnter");
+                            if ([buttonToTap respondsToSelector:onEnter]) {
+                                ((void(*)(id,SEL))objc_msgSend)(buttonToTap, onEnter);
+                            }
+                        }
+                    } @catch (NSException *e) {
+                        PALog(@"autopilot cocos activate exception %@", e);
+                    }
+                }
+            }
+        } @catch (NSException *e) {
+            PALog(@"autopilot exception %@", e);
+        }
+        PAAutoPilotTick(remaining - 1);
+    });
+}
     if (remaining <= 0) return;
     if (PAAccountReady()) {
         PALog(@"autopilot stop: logged in");
@@ -269,6 +407,8 @@ static void PABootFromNotification(void) {
         PALog(@"stage=bypass result=disabled");
     }
 
+    // Store hooks are OPT-IN ONLY (user instruction): without an explicit
+    // PAEnableStoreHooks=true in PoolAdminConfig.plist they stay dormant.
     if (PAFlagOptIn(@"PAEnableStoreHooks")) {
         @try {
             [PAStoreInterceptor install];
@@ -277,7 +417,7 @@ static void PABootFromNotification(void) {
             PALog(@"stage=store result=exception %@", exception);
         }
     } else {
-        PALog(@"stage=store result=skipped-opt-in");
+        PALog(@"stage=store result=disabled");
     }
 
     PAInstallWindowObserver();
@@ -328,6 +468,26 @@ static void __attribute__((constructor)) PAPoolAdminInit(void) {
     @try {
         [PAExitGuard install];
     } @catch (NSException *e) {}
+
+    // CRITICAL: Install integrity bypass EARLY (before DidFinishLaunching).
+    // The App Attest flow and receipt checks start during or before
+    // applicationDidFinishLaunching:. installEarly only uses Foundation
+    // hooks (no UIKit), so it's safe to call from a constructor.
+    @try {
+        [PAIntegrityBypass installEarly];
+    } @catch (NSException *e) {
+        PALog(@"stage=init earlyBypass exception: %@", e);
+    }
+
+    // Run discovery synchronously to find and auto-hook game verdict
+    // selectors before the integrity timer fires (~14s). This blocks
+    // for ~1-2s but that's acceptable at startup.
+    @try {
+        [PADiscovery run];
+    } @catch (NSException *e) {
+        PALog(@"stage=init discovery exception: %@", e);
+    }
+
     @try {
         __block id finishObserver = nil;
         void (^bootOnce)(void) = ^{
