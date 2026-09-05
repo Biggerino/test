@@ -2,23 +2,24 @@
 
 #import <objc/message.h>
 #import <objc/runtime.h>
-#import <dlfcn.h>
 #import <mach-o/dyld.h>
 #import "PALogger.h"
 #import "PAImageHider.h"
 
 // ---------------------------------------------------------------------------
 // DESIGN: Multi-layered verdict flip for 56.29.0.
-// //
+//
 // Layer 1 — Game-class swizzles (jailbreak/fraud/store booleans)
 // Layer 2 — App Attest neutralisation (DCAppAttestService)
 // Layer 3 — Receipt + provisioning profile fake-out
-// Layer 4 — Direct-kill interception (exit/_exit/abort/kill/ptrace)
-// Layer 5 — Alert suppression (presentViewController:)
-// Layer 6 — AppsFlyer V2 sanity flag cleanup
-// Layer 7 — Filesystem jailbreak path cloaking
-// Layer 8 — Hardcoded Miniclip integrity class hooks
-// //
+// Layer 4 — Alert suppression (presentViewController:)
+// Layer 5 — AppsFlyer V2 sanity flag cleanup
+// Layer 6 — Filesystem jailbreak path cloaking
+// Layer 7 — Hardcoded Miniclip integrity class hooks
+//
+// Exit/abort/kill/ptrace hooks live in PAImageHider.mm (PAExitGuard)
+// and are installed from the constructor — BEFORE PAIntegrityBypass.
+//
 // All hooks are exception-guarded and logged via PALog. Missing classes
 // or selectors are silently skipped.
 // ---------------------------------------------------------------------------
@@ -310,72 +311,6 @@ static void PAInstallReceiptHooks(void) {
     }
 }
 
-// Exit/abort/kill/ptrace guard functions — swallow suicide calls used by
-// integrity checks as a delayed kill. Each swallowed call is logged.
-static void PA_exit(int status) {
-    PALog(@"guard exit(%d) swallowed — staying alive", status);
-}
-
-static void PA__exit(int status) {
-    PALog(@"guard _exit(%d) swallowed — staying alive", status);
-}
-
-static void PA_abort(void) {
-    PALog(@"guard abort() swallowed — staying alive");
-}
-
-static int PA_kill(pid_t pid, int sig) {
-    static int (*real_kill)(pid_t, int) = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        real_kill = (int (*)(pid_t, int))dlsym(RTLD_NEXT, "kill");
-    });
-    if (pid == getpid() && (sig == 9 /*SIGKILL*/ || sig == 6 /*SIGABRT*/ ||
-                            sig == 15 /*SIGTERM*/)) {
-        PALog(@"guard kill(pid=%d, sig=%d) on self swallowed", (int)pid, sig);
-        return 0;
-    }
-    if (real_kill) return real_kill(pid, sig);
-    return -1;
-}
-
-// PT_DENY_ATTACH (31) is how a process refuses debuggers; anti-tamper
-// inverts it (fork+attach, or direct call) to detect analysis. Pretend
-// success without engaging so neither direction learns anything.
-static int PA_ptrace(int request, pid_t pid, void *addr, int data) {
-    static int (*real_ptrace)(int, pid_t, void *, int) = NULL;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        real_ptrace =
-            (int (*)(int, pid_t, void *, int))dlsym(RTLD_NEXT, "ptrace");
-    });
-    if (request == 31) {
-        PALog(@"guard ptrace(DENY_ATTACH) swallowed");
-        return 0;
-    }
-    if (real_ptrace) return real_ptrace(request, pid, addr, data);
-    return -1;
-}
-
-#pragma mark - Layer 4: Direct-kill interception (exit/_exit/abort/kill/ptrace)
-
-// Restored: only hook exit/_exit/abort/kill/ptrace - NOT syscall/pthread
-// because those are used for legitimate operations (network, threading)
-// and our aggressive hooking was freezing the app.
-
-static void PAInstallDirectKillHooks(void) {
-    @try {
-        PARebindAll("exit", (void *)&PA_exit);
-        PARebindAll("_exit", (void *)&PA__exit);
-        PARebindAll("abort", (void *)&PA_abort);
-        PARebindAll("kill", (void *)&PA_kill);
-        PARebindAll("ptrace", (void *)&PA_ptrace);
-        PALog(@"guard hooked exit/_exit/abort/kill/ptrace");
-    } @catch (NSException *e) {
-        PALog(@"guard direct-kill hooks exception: %@", e);
-    }
-}
-
 #pragma mark - Alert suppression (presentViewController:)
 
 static IMP sOriginal_present = NULL;
@@ -581,14 +516,8 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
             PALog(@"bypass phase0-attest exception: %@", e);
         }
 
-        // ── Phase 0b: Direct-kill interception ──
-        @try {
-            PAInstallDirectKillHooks();
-        } @catch (NSException *e) {
-            PALog(@"bypass phase0b-directkill exception: %@", e);
-        }
-
-        // ── Phase 0c: Receipt + mobileprovision ──
+        // ── Phase 0b: Receipt + mobileprovision (exit guard already
+        // installed by PAExitGuard in the constructor) ──
         @try {
             PAInstallReceiptHooks();
         } @catch (NSException *e) {
@@ -761,12 +690,7 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
             PALog(@"bypass early attest exception: %@", e);
         }
 
-        // Direct-kill hooks
-        @try {
-            PAInstallDirectKillHooks();
-        } @catch (NSException *e) {
-            PALog(@"bypass early directkill exception: %@", e);
-        }
+        // Direct-kill hooks already installed by PAExitGuard in the constructor
 
         // Receipt + mobileprovision (Foundation only, no UIKit)
         @try {

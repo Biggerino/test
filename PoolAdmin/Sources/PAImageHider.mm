@@ -347,7 +347,8 @@ static void PA_abort(void) {
     PALog(@"guard abort() swallowed — staying alive");
 }
 
-static int PA_kill(pid_t pid, int sig) {    static int (*real_kill)(pid_t, int) = NULL;
+static int PA_kill(pid_t pid, int sig) {
+    static int (*real_kill)(pid_t, int) = NULL;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         real_kill = (int (*)(pid_t, int))dlsym(RTLD_NEXT, "kill");
@@ -378,6 +379,8 @@ static int PA_ptrace(int request, pid_t pid, void *addr, int data) {
     if (real_ptrace) return real_ptrace(request, pid, addr, data);
     return -1;
 }
+
+#pragma mark - Exit guard: swallow process suicide used as a delayed kill.
 
 @implementation PAExitGuard
 
