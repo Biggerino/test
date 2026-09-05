@@ -310,82 +310,20 @@ static void PAInstallReceiptHooks(void) {
     }
 }
 
-#pragma mark - Layer 4: Direct-kill interception (syscall/pthread)
-static int (*sReal_syscall)(int, ...) = NULL;
-static int PA_syscall(int number, ...) {
-    // SYS_exit = 1, SYS_exit_group = 431 (ARM64 Linux; on iOS/XNU it's 1)
-    if (number == 1 || number == 431) {
-        PALog(@"guard syscall(%d) swallowed — staying alive", number);
-        // Return 0 to pretend success but don't actually exit
-        return 0;
-    }
-    // For other syscalls, we need to forward with the variadic args.
-    // Since we can't perfectly forward variadic args, and the game
-    // only uses syscall() for exit, just forward with up to 6 args.
-    va_list ap;
-    va_start(ap, number);
-    long a1 = va_arg(ap, long);
-    long a2 = va_arg(ap, long);
-    long a3 = va_arg(ap, long);
-    va_end(ap);
-    if (sReal_syscall) {
-        return sReal_syscall(number, a1, a2, a3);
-    }
-    return -1;
-}
+#pragma mark - Layer 4: Direct-kill interception (exit/_exit/abort/kill/ptrace)
 
-// pthread_exit hook — prevent main thread suicide
-static void (*sReal_pthread_exit)(void *) = NULL;
-static void PA_pthread_exit(void *value_ptr) {
-    if (pthread_main_np()) {
-        PALog(@"guard pthread_exit on main thread swallowed — staying alive");
-        // Don't call the real one; just return (which is technically
-        // undefined for pthread_exit, but keeps the thread alive)
-        return;
-    }
-    if (sReal_pthread_exit) {
-        sReal_pthread_exit(value_ptr);
-    }
-}
-
-// __pthread_kill hook — prevent SIGKILL/SIGABRT sent to specific threads
-static int (*sReal_pthread_kill)(pthread_t, int) = NULL;
-static int PA_pthread_kill_hook(pthread_t thread, int sig) {
-    if (sig == 9 /*SIGKILL*/ || sig == 6 /*SIGABRT*/ || sig == 15 /*SIGTERM*/) {
-        // Check if targeting our own process threads
-        if (pthread_equal(thread, pthread_self()) || pthread_main_np()) {
-            PALog(@"guard __pthread_kill(sig=%d) on self swallowed", sig);
-            return 0;
-        }
-    }
-    if (sReal_pthread_kill) {
-        return sReal_pthread_kill(thread, sig);
-    }
-    return -1;
-}
-
-// atexit handler — some code registers an atexit callback to terminate
-// after cleanup. We can't unhook atexit entirely but we can log it.
-static void (*sReal_atexit_fn)(void (*)(void)) = NULL;
+// Restored: only hook exit/_exit/abort/kill/ptrace - NOT syscall/pthread
+// because those are used for legitimate operations (network, threading)
+// and our aggressive hooking was freezing the app.
 
 static void PAInstallDirectKillHooks(void) {
     @try {
-        // Save originals via dlsym before rebinding
-        sReal_syscall = (int (*)(int, ...))dlsym(RTLD_DEFAULT, "syscall");
-        sReal_pthread_exit = (void (*)(void *))dlsym(RTLD_DEFAULT, "pthread_exit");
-        sReal_pthread_kill = (int (*)(pthread_t, int))dlsym(RTLD_DEFAULT, "pthread_kill");
-
-        PARebindAll("_syscall", (void *)&PA_syscall);
-        PARebindAll("syscall", (void *)&PA_syscall);
-        PALog(@"guard hooked syscall()");
-
-        PARebindAll("_pthread_exit", (void *)&PA_pthread_exit);
-        PARebindAll("pthread_exit", (void *)&PA_pthread_exit);
-        PALog(@"guard hooked pthread_exit()");
-
-        PARebindAll("_pthread_kill", (void *)&PA_pthread_kill_hook);
-        PARebindAll("pthread_kill", (void *)&PA_pthread_kill_hook);
-        PALog(@"guard hooked pthread_kill()");
+        PARebindAll("exit", (void *)&PA_exit);
+        PARebindAll("_exit", (void *)&PA__exit);
+        PARebindAll("abort", (void *)&PA_abort);
+        PARebindAll("kill", (void *)&PA_kill);
+        PARebindAll("ptrace", (void *)&PA_ptrace);
+        PALog(@"guard hooked exit/_exit/abort/kill/ptrace");
     } @catch (NSException *e) {
         PALog(@"guard direct-kill hooks exception: %@", e);
     }
