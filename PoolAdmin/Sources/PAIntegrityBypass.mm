@@ -4,21 +4,21 @@
 #import <objc/runtime.h>
 #import <dlfcn.h>
 #import <mach-o/dyld.h>
-#import <sys/syscall.h>
-#import <pthread.h>
 #import "PALogger.h"
 #import "PAImageHider.h"
 
 // ---------------------------------------------------------------------------
 // DESIGN: Multi-layered verdict flip for 56.29.0.
-//
+// //
 // Layer 1 — Game-class swizzles (jailbreak/fraud/store booleans)
 // Layer 2 — App Attest neutralisation (DCAppAttestService)
 // Layer 3 — Receipt + provisioning profile fake-out
-// Layer 4 — Direct-kill interception (syscall/pthread_exit)
+// Layer 4 — Direct-kill interception (exit/_exit/abort/kill/ptrace)
 // Layer 5 — Alert suppression (presentViewController:)
 // Layer 6 — AppsFlyer V2 sanity flag cleanup
-//
+// Layer 7 — Filesystem jailbreak path cloaking
+// Layer 8 — Hardcoded Miniclip integrity class hooks
+// //
 // All hooks are exception-guarded and logged via PALog. Missing classes
 // or selectors are silently skipped.
 // ---------------------------------------------------------------------------
