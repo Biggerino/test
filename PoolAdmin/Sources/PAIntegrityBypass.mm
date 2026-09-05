@@ -310,13 +310,52 @@ static void PAInstallReceiptHooks(void) {
     }
 }
 
-#pragma mark - Layer 4: Direct-kill interception (exit/_exit/abort/kill/ptrace)
+// Exit/abort/kill/ptrace guard functions — swallow suicide calls used by
+// integrity checks as a delayed kill. Each swallowed call is logged.
+static void PA_exit(int status) {
+    PALog(@"guard exit(%d) swallowed — staying alive", status);
+}
 
-// Restored: only hook exit/_exit/abort/kill/ptrace - NOT syscall/pthread
-// because those are used for legitimate operations (network, threading)
-// and our aggressive hooking was freezing the app.
+static void PA__exit(int status) {
+    PALog(@"guard _exit(%d) swallowed — staying alive", status);
+}
 
-static void PAInstallDirectKillHooks(void) {
+static void PA_abort(void) {
+    PALog(@"guard abort() swallowed — staying alive");
+}
+
+static int PA_kill(pid_t pid, int sig) {
+    static int (*real_kill)(pid_t, int) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        real_kill = (int (*)(pid_t, int))dlsym(RTLD_NEXT, "kill");
+    });
+    if (pid == getpid() && (sig == 9 /*SIGKILL*/ || sig == 6 /*SIGABRT*/ ||
+                            sig == 15 /*SIGTERM*/)) {
+        PALog(@"guard kill(pid=%d, sig=%d) on self swallowed", (int)pid, sig);
+        return 0;
+    }
+    if (real_kill) return real_kill(pid, sig);
+    return -1;
+}
+
+// PT_DENY_ATTACH (31) is how a process refuses debuggers; anti-tamper
+// inverts it (fork+attach, or direct call) to detect analysis. Pretend
+// success without engaging so neither direction learns anything.
+static int PA_ptrace(int request, pid_t pid, void *addr, int data) {
+    static int (*real_ptrace)(int, pid_t, void *, int) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        real_ptrace =
+            (int (*)(int, pid_t, void *, int))dlsym(RTLD_NEXT, "ptrace");
+    });
+    if (request == 31) {
+        PALog(@"guard ptrace(DENY_ATTACH) swallowed");
+        return 0;
+    }
+    if (real_ptrace) return real_ptrace(request, pid, addr, data);
+    return -1;
+}
     @try {
         PARebindAll("exit", (void *)&PA_exit);
         PARebindAll("_exit", (void *)&PA__exit);
