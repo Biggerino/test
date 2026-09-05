@@ -1,4 +1,5 @@
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
 #import "PAImageHider.h"
 #import "PADiscovery.h"
 #import "PAIntegrityBypass.h"
@@ -93,31 +94,6 @@ static UIWindow *PAFindBestWindow(void) {
     } @catch (NSException *e) {
         PALog(@"window lookup exception: %@", e);
     }
-    return nil;
-}
-
-// Auto-pilot: before login, poll for the onboarding buttons (Terms
-// "Accept", "Play as Guest") and tap the first visible one. Beats the
-// freeze window without the user racing it. Pure UIKit search — if the
-// game draws these in Cocos it finds nothing and stays idle (logged).
-static UIButton *PAFindButton(UIView *view, NSArray<NSString *> *titles) {
-    @try {
-        if ([view isKindOfClass:UIButton.class]) {
-            UIButton *button = (UIButton *)view;
-            NSString *title = button.currentTitle ?: @"";
-            NSString *label = button.accessibilityLabel ?: @"";
-            NSString *both = [NSString stringWithFormat:@"%@ %@", title, label];
-            for (NSString *want in titles) {
-                if ([both localizedCaseInsensitiveContainsString:want]) {
-                    return button;
-                }
-            }
-        }
-        for (UIView *sub in view.subviews) {
-            UIButton *found = PAFindButton(sub, titles);
-            if (found) return found;
-        }
-    } @catch (NSException *e) {}
     return nil;
 }
 
@@ -260,29 +236,6 @@ static void PAAutoPilotTick(int remaining) {
         PAAutoPilotTick(remaining - 1);
     });
 }
-    if (remaining <= 0) return;
-    if (PAAccountReady()) {
-        PALog(@"autopilot stop: logged in");
-        return;
-    }
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-        @try {
-            UIWindow *window = PAFindBestWindow();
-            UIButton *button = window ? PAFindButton(
-                window, @[@"Accept", @"Play as Guest"]) : nil;
-            if (button && button.enabled && !button.hidden &&
-                button.alpha > 0.01 && button.window) {
-                PALog(@"autopilot tapping '%@'",
-                      button.currentTitle ?: @"?");
-                [button sendActionsForControlEvents:UIControlEventTouchUpInside];
-            }
-        } @catch (NSException *e) {
-            PALog(@"autopilot exception %@", e);
-        }
-        PAAutoPilotTick(remaining - 1);
-    });
-}
 
 static void PAAttachViewsToWindow(int retryCount) {
     if (retryCount <= 0) {
@@ -417,7 +370,7 @@ static void PABootFromNotification(void) {
             PALog(@"stage=store result=exception %@", exception);
         }
     } else {
-        PALog(@"stage=store result=disabled");
+        PALog(@"stage=store result=skipped-opt-in");
     }
 
     PAInstallWindowObserver();
@@ -513,7 +466,7 @@ static void __attribute__((constructor)) PAPoolAdminInit(void) {
             addObserverForName:@"UIApplicationDidFinishLaunchingNotification"
                         object:nil
                          queue:nil
-                    usingBlock:^(NSNotification *note) {
+                     usingBlock:^(NSNotification *note) {
             (void)note;
             dispatch_async(dispatch_get_main_queue(), ^{
                 bootOnce();
