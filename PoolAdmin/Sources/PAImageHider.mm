@@ -345,7 +345,7 @@ static void PA_abort(void) { PALog(@"guard abort() swallowed"); }
 static int PA_kill(pid_t pid, int sig) {
     static int (*real_kill)(pid_t, int) = NULL;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ real_kill = dlsym(RTLD_NEXT, "kill"); });
+    dispatch_once(&onceToken, ^{ real_kill = (int (*)(pid_t, int))dlsym(RTLD_NEXT, "kill"); });
     if (pid == getpid()) { PALog(@"guard kill(pid=%d,sig=%d) swallowed", (int)pid, sig); return 0; }
     if (real_kill) return real_kill(pid, sig);
     return -1;
@@ -354,7 +354,7 @@ static int PA_kill(pid_t pid, int sig) {
 static int PA_raise(int sig) {
     static int (*real_raise)(int) = NULL;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ real_raise = dlsym(RTLD_NEXT, "raise"); });
+    dispatch_once(&onceToken, ^{ real_raise = (int (*)(int))dlsym(RTLD_NEXT, "raise"); });
     PALog(@"guard raise(sig=%d) swallowed", sig);
     return 0;
 }
@@ -362,7 +362,7 @@ static int PA_raise(int sig) {
 static int PA_pthread_kill(pthread_t thread, int sig) {
     static int (*real_pthread_kill)(pthread_t, int) = NULL;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ real_pthread_kill = dlsym(RTLD_NEXT, "pthread_kill"); });
+    dispatch_once(&onceToken, ^{ real_pthread_kill = (int (*)(pthread_t, int))dlsym(RTLD_NEXT, "pthread_kill"); });
     if (pthread_equal(thread, pthread_self()) || pthread_main_np()) {
         PALog(@"guard pthread_kill(sig=%d) on self swallowed", sig);
         return 0;
@@ -378,7 +378,7 @@ static void PA_pthread_exit(void *value_ptr) {
 static int PA_ptrace(int request, pid_t pid, void *addr, int data) {
     static int (*real_ptrace)(int, pid_t, void *, int) = NULL;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{ real_ptrace = dlsym(RTLD_NEXT, "ptrace"); });
+    dispatch_once(&onceToken, ^{ real_ptrace = (int (*)(int, pid_t, void *, int))dlsym(RTLD_NEXT, "ptrace"); });
     if (request == 31) { PALog(@"guard ptrace(DENY_ATTACH) swallowed"); return 0; }
     if (real_ptrace) return real_ptrace(request, pid, addr, data);
     return -1;

@@ -318,10 +318,6 @@ static void PA_presentVC(id self, SEL _cmd, UIViewController *vc, BOOL anim, voi
     }
 }
 
-#pragma mark - Alert suppression (presentViewController:)
-
-static IMP sOriginal_present = NULL;
-
 #pragma mark - Layer 6: AppsFlyer V2 Sanity Flags
 
 static IMP sOriginal_v2Sanity = NULL;
