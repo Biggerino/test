@@ -182,7 +182,10 @@ static id PACocosFindButton(id root, NSArray<NSString *> *titles) {
 static void PAAutoPilotTick(int remaining) {
     if (remaining <= 0) return;
     if (PAAccountReady()) {
-        PALog(@"autopilot stop: logged in");
+        PALog(@"autopilot stop: logged in — attaching views now");
+        dispatch_async(dispatch_get_main_queue(), ^{
+            PAAttachViewsToWindow(10);
+        });
         return;
     }
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),

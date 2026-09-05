@@ -23,59 +23,38 @@
 // or selectors are silently skipped.
 // ---------------------------------------------------------------------------
 
-#pragma mark - Safe per-class swizzle
+#pragma mark - Safe per-class and per-metaclass swizzle
 
-static void SwizzleOnNamedClass(const char *className, SEL selector, IMP replacement) {
+static void SwizzleMethod(const char *className, SEL selector, IMP replacement) {
     @try {
         Class cls = objc_getClass(className);
         if (!cls) return;
 
-        unsigned int count = 0;
-        Method *methods = class_copyMethodList(cls, &count);
-        if (!methods) return;
-
-        Method targetMethod = NULL;
-        for (unsigned int i = 0; i < count; i++) {
-            if (sel_isEqual(method_getName(methods[i]), selector)) {
-                targetMethod = methods[i];
-                break;
-            }
+        // 1. Try instance method
+        Method instMethod = class_getInstanceMethod(cls, selector);
+        if (instMethod) {
+            method_setImplementation(instMethod, replacement);
+            PALog(@"swizzled -[%s %@] done", className, NSStringFromSelector(selector));
         }
-        free(methods);
 
-        if (targetMethod) {
-            method_setImplementation(targetMethod, replacement);
-        }
-    } @catch (NSException *e) {
-        // Silently ignore — never crash
-    }
-}
-
-// Same but for class (meta) methods
-static void SwizzleClassMethod(const char *className, SEL selector, IMP replacement) {
-    @try {
-        Class cls = objc_getClass(className);
-        if (!cls) return;
+        // 2. Try class method on metaclass
         Class meta = object_getClass((id)cls);
-        if (!meta) return;
-
-        unsigned int count = 0;
-        Method *methods = class_copyMethodList(meta, &count);
-        if (!methods) return;
-
-        Method targetMethod = NULL;
-        for (unsigned int i = 0; i < count; i++) {
-            if (sel_isEqual(method_getName(methods[i]), selector)) {
-                targetMethod = methods[i];
-                break;
+        if (meta && meta != cls) {
+            Method classMethod = class_getInstanceMethod(meta, selector);
+            if (classMethod) {
+                method_setImplementation(classMethod, replacement);
+                PALog(@"swizzled +[%s %@] done", className, NSStringFromSelector(selector));
             }
-        }
-        free(methods);
-
-        if (targetMethod) {
-            method_setImplementation(targetMethod, replacement);
         }
     } @catch (NSException *e) {}
+}
+
+static void SwizzleOnNamedClass(const char *className, SEL selector, IMP replacement) {
+    SwizzleMethod(className, selector, replacement);
+}
+
+static void SwizzleClassMethod(const char *className, SEL selector, IMP replacement) {
+    SwizzleMethod(className, selector, replacement);
 }
 
 #pragma mark - Replacement stubs
@@ -97,37 +76,53 @@ static BOOL PA_attestNotSupported(id self, SEL _cmd) {
     return NO;
 }
 
-// attestKey:completionHandler: — call the completion handler with an error
-// immediately, simulating "App Attest not available".
-static void PA_attestKeyNeutered(id self, SEL _cmd, NSString *keyId,
-                                  id completionHandler) {
-    PALog(@"attest attestKey: neutered → error callback keyId=%@", keyId ?: @"(nil)");
+// generateKeyWithCompletionHandler: — return DCErrorFeatureUnsupported (code 1)
+static void PA_generateKeyNeutered(id self, SEL _cmd, id completionHandler) {
+    PALog(@"attest generateKey: neutered → error callback");
     @try {
         if (completionHandler) {
-            NSError *err = [NSError errorWithDomain:@"com.apple.devicecheck.error"
-                                               code:-2 // DCErrorServerUnavailable
+            NSError *err = [NSError errorWithDomain:@"DCErrorDomain"
+                                               code:1 // DCErrorFeatureUnsupported
                                            userInfo:@{NSLocalizedDescriptionKey:
-                                                       @"App Attest is not available"}];
-            // completionHandler is ^(NSError *error)
-            void (^block)(NSError *) = (void (^)(NSError *))completionHandler;
-            block(err);
+                                                       @"App Attest is not supported on this device"}];
+            void (^block)(NSString *, NSError *) = (void (^)(NSString *, NSError *))completionHandler;
+            block(nil, err);
+        }
+    } @catch (NSException *e) {
+        PALog(@"attest generateKey: completion exception %@", e);
+    }
+}
+
+// attestKey:clientDataHash:completionHandler: (takes 3 arguments)
+static void PA_attestKeyNeutered(id self, SEL _cmd, NSString *keyId,
+                                  NSData *clientDataHash,
+                                  id completionHandler) {
+    PALog(@"attest attestKey:clientDataHash: neutered → error callback keyId=%@", keyId ?: @"(nil)");
+    @try {
+        if (completionHandler) {
+            NSError *err = [NSError errorWithDomain:@"DCErrorDomain"
+                                               code:1 // DCErrorFeatureUnsupported
+                                           userInfo:@{NSLocalizedDescriptionKey:
+                                                       @"App Attest is not supported on this device"}];
+            void (^block)(NSData *, NSError *) = (void (^)(NSData *, NSError *))completionHandler;
+            block(nil, err);
         }
     } @catch (NSException *e) {
         PALog(@"attest attestKey: completion exception %@", e);
     }
 }
 
-// generateAssertion:clientDataHash:completionHandler: — same pattern
+// generateAssertion:clientDataHash:completionHandler: (takes 3 arguments)
 static void PA_generateAssertionNeutered(id self, SEL _cmd, NSString *keyId,
                                           NSData *clientDataHash,
                                           id completionHandler) {
-    PALog(@"attest generateAssertion: neutered → error callback");
+    PALog(@"attest generateAssertion:clientDataHash: neutered → error callback");
     @try {
         if (completionHandler) {
-            NSError *err = [NSError errorWithDomain:@"com.apple.devicecheck.error"
-                                               code:-2
+            NSError *err = [NSError errorWithDomain:@"DCErrorDomain"
+                                               code:1 // DCErrorFeatureUnsupported
                                            userInfo:@{NSLocalizedDescriptionKey:
-                                                       @"App Attest is not available"}];
+                                                       @"App Attest is not supported on this device"}];
             void (^block)(NSData *, NSError *) =
                 (void (^)(NSData *, NSError *))completionHandler;
             block(nil, err);
@@ -137,8 +132,6 @@ static void PA_generateAssertionNeutered(id self, SEL _cmd, NSString *keyId,
     }
 }
 
-// Hook the shared/default instance getter to return our neutered proxy
-// if the class exists.
 static void PAInstallAppAttestHooks(void) {
     @try {
         Class attestClass = NSClassFromString(@"DCAppAttestService");
@@ -147,39 +140,10 @@ static void PAInstallAppAttestHooks(void) {
             return;
         }
 
-        // +[DCAppAttestService shared] or +sharedService
-        // Hook the class method isSupported on the metaclass
-        Method isSup = class_getInstanceMethod(attestClass,
-                            NSSelectorFromString(@"isSupported"));
-        if (isSup) {
-            method_setImplementation(isSup, (IMP)PA_attestNotSupported);
-            PALog(@"attest hooked -[DCAppAttestService isSupported] → NO");
-        }
-
-        // Hook attestKey:completionHandler:
-        Method attestKeyM = class_getInstanceMethod(attestClass,
-                            NSSelectorFromString(@"attestKey:completionHandler:"));
-        if (attestKeyM) {
-            method_setImplementation(attestKeyM, (IMP)PA_attestKeyNeutered);
-            PALog(@"attest hooked -[DCAppAttestService attestKey:completionHandler:]");
-        }
-
-        // Hook generateAssertion:clientDataHash:completionHandler:
-        Method genAssertM = class_getInstanceMethod(attestClass,
-                            NSSelectorFromString(@"generateAssertion:clientDataHash:completionHandler:"));
-        if (genAssertM) {
-            method_setImplementation(genAssertM, (IMP)PA_generateAssertionNeutered);
-            PALog(@"attest hooked -[DCAppAttestService generateAssertion:...]");
-        }
-
-        // Also hook the class-level +isSupported (some code paths call it
-        // as a class method)
-        Method isSupClass = class_getClassMethod(attestClass,
-                            NSSelectorFromString(@"isSupported"));
-        if (isSupClass) {
-            method_setImplementation(isSupClass, (IMP)PA_attestNotSupported);
-            PALog(@"attest hooked +[DCAppAttestService isSupported] → NO");
-        }
+        SwizzleMethod("DCAppAttestService", NSSelectorFromString(@"isSupported"), (IMP)PA_attestNotSupported);
+        SwizzleMethod("DCAppAttestService", NSSelectorFromString(@"generateKeyWithCompletionHandler:"), (IMP)PA_generateKeyNeutered);
+        SwizzleMethod("DCAppAttestService", NSSelectorFromString(@"attestKey:clientDataHash:completionHandler:"), (IMP)PA_attestKeyNeutered);
+        SwizzleMethod("DCAppAttestService", NSSelectorFromString(@"generateAssertion:clientDataHash:completionHandler:"), (IMP)PA_generateAssertionNeutered);
     } @catch (NSException *e) {
         PALog(@"attest install exception: %@", e);
     }
@@ -187,48 +151,10 @@ static void PAInstallAppAttestHooks(void) {
 
 #pragma mark - Layer 3: Receipt + mobileprovision fake-out
 
-// Create a minimal fake App Store receipt at the expected path.
-// The receipt doesn't need to be cryptographically valid — the game
-// checks for its *existence* locally; server-side validation happens
-// over the network where the check has different failure modes.
-static NSString *PAFakeReceiptPath(void) {
-    @try {
-        NSURL *receiptURL = [[NSBundle mainBundle] appStoreReceiptURL];
-        if (receiptURL) {
-            return receiptURL.path;
-        }
-        // Fallback: construct the standard path
-        NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-        return [bundlePath stringByAppendingPathComponent:@"_MASReceipt/receipt"];
-    } @catch (NSException *e) {
-        return nil;
-    }
-}
-
-static void PACreateFakeReceipt(void) {
-    @try {
-        NSString *receiptPath = PAFakeReceiptPath();
-        if (!receiptPath) {
-            PALog(@"receipt path is nil — skipping fake receipt");
-            return;
-        }
-
-        // Check if a receipt already exists
-        if ([[NSFileManager defaultManager] fileExistsAtPath:receiptPath]) {
-            PALog(@"receipt file already exists at %@", receiptPath);
-            return;
-        }
-
-        // Create parent directory
-        NSString *parentDir = [receiptPath stringByDeletingLastPathComponent];
-        [[NSFileManager defaultManager] createDirectoryAtPath:parentDir
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                        error:nil];
-
-        // Minimal ASN.1 DER: a SEQUENCE containing an OCTET STRING with
-        // placeholder data. This is enough to pass an existence check and
-        // a basic "is it DER?" sniff.
+static NSData *sFakeReceiptData = nil;
+static NSData *PAFakeReceiptData(void) {
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
         unsigned char fakeReceipt[] = {
             0x30, 0x80, // SEQUENCE, indefinite length
             0x06, 0x09, // OID
@@ -245,52 +171,74 @@ static void PACreateFakeReceipt(void) {
             0x00, 0x00, // end [0]
             0x00, 0x00, // end outer SEQUENCE
         };
+        sFakeReceiptData = [NSData dataWithBytes:fakeReceipt length:sizeof(fakeReceipt)];
+    });
+    return sFakeReceiptData;
+}
 
-        NSData *data = [NSData dataWithBytes:fakeReceipt
-                                      length:sizeof(fakeReceipt)];
-        BOOL written = [data writeToFile:receiptPath atomically:YES];
+static NSString *PAFakeReceiptPath(void) {
+    @try {
+        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
+        return [docs stringByAppendingPathComponent:@"StoreKit_receipt"];
+    } @catch (NSException *e) {
+        return nil;
+    }
+}
+
+static void PACreateFakeReceipt(void) {
+    @try {
+        NSString *receiptPath = PAFakeReceiptPath();
+        if (!receiptPath) {
+            PALog(@"receipt path is nil — skipping fake receipt");
+            return;
+        }
+
+        NSData *data = PAFakeReceiptData();
+        NSError *err = nil;
+        BOOL written = [data writeToFile:receiptPath options:NSDataWritingAtomic error:&err];
         if (written) {
             PALog(@"receipt file created at %@", receiptPath);
         } else {
-            PALog(@"receipt file create FAILED at %@ (write returned NO)", receiptPath);
+            PALog(@"receipt file create FAILED at %@: %@", receiptPath, err);
         }
     } @catch (NSException *e) {
         PALog(@"receipt creation exception: %@", e);
     }
 }
 
-// Hook NSBundle's appStoreReceiptURL to return a valid-looking URL
-// even on sideloaded installs. The fake receipt file must exist at
-// this path (created by PACreateFakeReceipt).
 static IMP sOriginal_appStoreReceiptURL = NULL;
-
 static NSURL *PA_appStoreReceiptURL(id self, SEL _cmd) {
     @try {
-        // Only hook the main bundle
         if (self != [NSBundle mainBundle]) {
             if (sOriginal_appStoreReceiptURL) {
                 return ((NSURL *(*)(id, SEL))sOriginal_appStoreReceiptURL)(self, _cmd);
             }
             return nil;
         }
-
-        // Return the real URL if a receipt exists there
-        NSURL *real = nil;
-        if (sOriginal_appStoreReceiptURL) {
-            real = ((NSURL *(*)(id, SEL))sOriginal_appStoreReceiptURL)(self, _cmd);
-        }
-        if (real && [[NSFileManager defaultManager] fileExistsAtPath:real.path]) {
-            return real;
-        }
-
-        // Return our fake receipt path
-        NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-        NSString *path = [bundlePath stringByAppendingPathComponent:
-                          @"_MASReceipt/receipt"];
-        return [NSURL fileURLWithPath:path];
+        return [NSURL fileURLWithPath:PAFakeReceiptPath()];
     } @catch (NSException *e) {
         return nil;
     }
+}
+
+// Intercept [NSData dataWithContentsOfURL:] for receipt URL requests
+static IMP sOriginal_dataWithContentsOfURL = NULL;
+static NSData *PA_dataWithContentsOfURL(id self, SEL _cmd, NSURL *url) {
+    @try {
+        if (url && [url isKindOfClass:NSURL.class]) {
+            NSString *p = url.path;
+            if ([p hasSuffix:@"StoreKit_receipt"] ||
+                [p hasSuffix:@"sandboxReceipt"] ||
+                [p hasSuffix:@"_MASReceipt/receipt"]) {
+                PALog(@"receipt dataWithContentsOfURL intercepted: %@", p);
+                return PAFakeReceiptData();
+            }
+        }
+    } @catch (NSException *e) {}
+    if (sOriginal_dataWithContentsOfURL) {
+        return ((NSData *(*)(id, SEL, NSURL *))sOriginal_dataWithContentsOfURL)(self, _cmd, url);
+    }
+    return nil;
 }
 
 // Cloak embedded.mobileprovision — its presence signals a sideloaded app.
@@ -299,10 +247,16 @@ static IMP sOriginal_contentsAtPath = NULL;
 
 static NSData *PA_contentsAtPath(id self, SEL _cmd, NSString *path) {
     @try {
-        if ([path isKindOfClass:NSString.class] &&
-            [path hasSuffix:@"embedded.mobileprovision"]) {
-            PALog(@"mobileprovision read blocked: %@", path);
-            return nil;
+        if ([path isKindOfClass:NSString.class]) {
+            if ([path hasSuffix:@"embedded.mobileprovision"]) {
+                PALog(@"mobileprovision read blocked: %@", path);
+                return nil;
+            }
+            if ([path hasSuffix:@"StoreKit_receipt"] ||
+                [path hasSuffix:@"sandboxReceipt"] ||
+                [path hasSuffix:@"_MASReceipt/receipt"]) {
+                return PAFakeReceiptData();
+            }
         }
     } @catch (NSException *e) {}
     if (sOriginal_contentsAtPath) {
@@ -314,10 +268,9 @@ static NSData *PA_contentsAtPath(id self, SEL _cmd, NSString *path) {
 
 static void PAInstallReceiptHooks(void) {
     @try {
-        // Create fake receipt first
         PACreateFakeReceipt();
 
-        // Hook appStoreReceiptURL
+        // Hook appStoreReceiptURL on NSBundle
         Method receiptURLMethod = class_getInstanceMethod(
             [NSBundle class], NSSelectorFromString(@"appStoreReceiptURL"));
         if (receiptURLMethod) {
@@ -326,13 +279,22 @@ static void PAInstallReceiptHooks(void) {
             PALog(@"receipt hooked -[NSBundle appStoreReceiptURL]");
         }
 
-        // Hook NSFileManager contentsAtPath: to cloak mobileprovision
+        // Hook NSFileManager contentsAtPath:
         Method contentsMethod = class_getInstanceMethod(
             [NSFileManager class], @selector(contentsAtPath:));
         if (contentsMethod) {
             sOriginal_contentsAtPath = method_getImplementation(contentsMethod);
             method_setImplementation(contentsMethod, (IMP)PA_contentsAtPath);
             PALog(@"receipt hooked -[NSFileManager contentsAtPath:]");
+        }
+
+        // Hook +[NSData dataWithContentsOfURL:]
+        Method dataURLMethod = class_getClassMethod(
+            [NSData class], @selector(dataWithContentsOfURL:));
+        if (dataURLMethod) {
+            sOriginal_dataWithContentsOfURL = method_getImplementation(dataURLMethod);
+            method_setImplementation(dataURLMethod, (IMP)PA_dataWithContentsOfURL);
+            PALog(@"receipt hooked +[NSData dataWithContentsOfURL:]");
         }
     } @catch (NSException *e) {
         PALog(@"receipt hooks exception: %@", e);
@@ -488,10 +450,16 @@ static BOOL PA_fileExists(id self, SEL _cmd, NSString *path) {
     if (PAIsJailbreakPath(path)) return NO;
     // Also hide mobileprovision from file-exists checks
     @try {
-        if ([path isKindOfClass:NSString.class] &&
-            [path hasSuffix:@"embedded.mobileprovision"]) {
-            PALog(@"mobileprovision fileExists blocked: %@", path);
-            return NO;
+        if ([path isKindOfClass:NSString.class]) {
+            if ([path hasSuffix:@"embedded.mobileprovision"]) {
+                PALog(@"mobileprovision fileExists blocked: %@", path);
+                return NO;
+            }
+            if ([path hasSuffix:@"StoreKit_receipt"] ||
+                [path hasSuffix:@"sandboxReceipt"] ||
+                [path hasSuffix:@"_MASReceipt/receipt"]) {
+                return YES;
+            }
         }
     } @catch (NSException *e) {}
     if (sOriginal_fileExists) {
@@ -506,10 +474,17 @@ static BOOL PA_fileExistsDir(id self, SEL _cmd, NSString *path, BOOL *isDir) {
         return NO;
     }
     @try {
-        if ([path isKindOfClass:NSString.class] &&
-            [path hasSuffix:@"embedded.mobileprovision"]) {
-            if (isDir) *isDir = NO;
-            return NO;
+        if ([path isKindOfClass:NSString.class]) {
+            if ([path hasSuffix:@"embedded.mobileprovision"]) {
+                if (isDir) *isDir = NO;
+                return NO;
+            }
+            if ([path hasSuffix:@"StoreKit_receipt"] ||
+                [path hasSuffix:@"sandboxReceipt"] ||
+                [path hasSuffix:@"_MASReceipt/receipt"]) {
+                if (isDir) *isDir = NO;
+                return YES;
+            }
         }
     } @catch (NSException *e) {}
     if (sOriginal_fileExistsDir) {
@@ -558,7 +533,7 @@ static void PAInstallAppsFlyerSanityHooks(void) {
                 method_setImplementation(mVal, (IMP)PA_calculateV2Value);
                 PALog(@"swizzled AFSDKChecksum calculateV2Value");
             }
-            SwizzleOnNamedClass("AFSDKChecksum", NSSelectorFromString(@"isCounterValid"), (IMP)PA_returnYES);
+            SwizzleMethod("AFSDKChecksum", NSSelectorFromString(@"isCounterValid"), (IMP)PA_returnYES);
         }
     } @catch (NSException *e) {
         PALog(@"AppsFlyer sanity hooks exception: %@", e);
@@ -571,6 +546,7 @@ static const char *kGameClasses[] = {
     "AppsFlyerLib",
     "AppsFlyerTracker",
     "AppsFlyerLinkGenerator",
+    "AppsFlyerUtils",
     "AFSDKUtils",
     "AFSDKChecksum",
     "MCMenuStateManager",
@@ -586,9 +562,14 @@ static const char *kGameClasses[] = {
     "MCJailbreakDetector",
     "AppIntegrity",
     "IntegrityManager",
-    // Additional classes seen in 56.29.0 binary analysis
     "BUDeviceInfo",
     "MCDeviceInfo",
+    // Discovered 56.29.0 device security & environment classes
+    "STKDevice",
+    "PAGDeviceHelper",
+    "APMIdentity",
+    "GULAppEnvironmentUtil",
+    "MTGDeviceHandler",
 };
 static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]);
 
@@ -600,7 +581,6 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
         PALog(@"bypass stage=install begin");
 
         // ── Phase 0: App Attest neutralisation (MOST CRITICAL) ──
-        // Must run before the game's attestation flow starts.
         @try {
             PAInstallAppAttestHooks();
         } @catch (NSException *e) {
@@ -621,32 +601,35 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
             PALog(@"bypass phase0c-receipt exception: %@", e);
         }
 
-        // ── Phase 1: Game-class swizzles ──
+        // ── Phase 1: Game-class swizzles (instance + metaclass) ──
         @try {
             for (int i = 0; i < kGameClassCount; i++) {
                 const char *cls = kGameClasses[i];
 
                 // Jailbreak detection
-                SwizzleOnNamedClass(cls, @selector(isJailbroken),  (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, @selector(isJailBroken),  (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"bu_isJailBroken"), (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"jailbroken"),      (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"jailBroken"),      (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"isJailbrokenWithSkipAdvancedJailbreakValidation:"),
-                                   (IMP)PA_returnNO_arg);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"containsJailbrokenFiles"),       (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"containsJailbrokenPermissions"),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, @selector(isJailbroken),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, @selector(isJailBroken),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"bu_isJailBroken"), (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"jailbroken"),      (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"jailBroken"),      (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isJailbrokenWithSkipAdvancedJailbreakValidation:"),
+                              (IMP)PA_returnNO_arg);
+                SwizzleMethod(cls, NSSelectorFromString(@"containsJailbrokenFiles"),       (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"containsJailbrokenPermissions"),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isDeviceCompromised"), (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isDebuggerAttached"),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isRooted"),            (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isSimulator"),         (IMP)PA_returnNO);
 
                 // Store / receipt
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"isAppStoreReceiptSandbox"), (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"isFromAppStore"),           (IMP)PA_returnYES);
+                SwizzleMethod(cls, NSSelectorFromString(@"isAppStoreReceiptSandbox"), (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isFromAppStore"),           (IMP)PA_returnYES);
+                SwizzleMethod(cls, NSSelectorFromString(@"isAppStoreReceiptValid"),   (IMP)PA_returnYES);
 
                 // Fraud detection
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"setFraudDetectionEnabled:"),          (IMP)PA_noopBool);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"commandReceivedWithURL:fraudDetected:"), (IMP)PA_noopIdBool);
-
-                // Force skip advanced JB validation
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"setSkipAdvancedJailbreakValidation:"), (IMP)PA_noopBool);
+                SwizzleMethod(cls, NSSelectorFromString(@"setFraudDetectionEnabled:"),          (IMP)PA_noopBool);
+                SwizzleMethod(cls, NSSelectorFromString(@"commandReceivedWithURL:fraudDetected:"), (IMP)PA_noopIdBool);
+                SwizzleMethod(cls, NSSelectorFromString(@"setSkipAdvancedJailbreakValidation:"), (IMP)PA_noopBool);
             }
             PALog(@"bypass phase1-swizzle done (%d classes)", kGameClassCount);
         } @catch (NSException *e) {
@@ -802,20 +785,28 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
         @try {
             for (int i = 0; i < kGameClassCount; i++) {
                 const char *cls = kGameClasses[i];
-                SwizzleOnNamedClass(cls, @selector(isJailbroken),  (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, @selector(isJailBroken),  (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"bu_isJailBroken"), (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"jailbroken"),      (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"jailBroken"),      (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"isJailbrokenWithSkipAdvancedJailbreakValidation:"),
-                                   (IMP)PA_returnNO_arg);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"containsJailbrokenFiles"),       (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"containsJailbrokenPermissions"),  (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"isAppStoreReceiptSandbox"), (IMP)PA_returnNO);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"isFromAppStore"),           (IMP)PA_returnYES);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"setFraudDetectionEnabled:"),          (IMP)PA_noopBool);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"commandReceivedWithURL:fraudDetected:"), (IMP)PA_noopIdBool);
-                SwizzleOnNamedClass(cls, NSSelectorFromString(@"setSkipAdvancedJailbreakValidation:"), (IMP)PA_noopBool);
+
+                SwizzleMethod(cls, @selector(isJailbroken),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, @selector(isJailBroken),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"bu_isJailBroken"), (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"jailbroken"),      (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"jailBroken"),      (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isJailbrokenWithSkipAdvancedJailbreakValidation:"),
+                              (IMP)PA_returnNO_arg);
+                SwizzleMethod(cls, NSSelectorFromString(@"containsJailbrokenFiles"),       (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"containsJailbrokenPermissions"),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isDeviceCompromised"), (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isDebuggerAttached"),  (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isRooted"),            (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isSimulator"),         (IMP)PA_returnNO);
+
+                SwizzleMethod(cls, NSSelectorFromString(@"isAppStoreReceiptSandbox"), (IMP)PA_returnNO);
+                SwizzleMethod(cls, NSSelectorFromString(@"isFromAppStore"),           (IMP)PA_returnYES);
+                SwizzleMethod(cls, NSSelectorFromString(@"isAppStoreReceiptValid"),   (IMP)PA_returnYES);
+
+                SwizzleMethod(cls, NSSelectorFromString(@"setFraudDetectionEnabled:"),          (IMP)PA_noopBool);
+                SwizzleMethod(cls, NSSelectorFromString(@"commandReceivedWithURL:fraudDetected:"), (IMP)PA_noopIdBool);
+                SwizzleMethod(cls, NSSelectorFromString(@"setSkipAdvancedJailbreakValidation:"), (IMP)PA_noopBool);
             }
         } @catch (NSException *e) {
             PALog(@"bypass early swizzle exception: %@", e);
