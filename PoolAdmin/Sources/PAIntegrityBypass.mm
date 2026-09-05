@@ -178,9 +178,10 @@ static NSData *PAFakeReceiptData(void) {
 
 static NSString *PAFakeReceiptPath(void) {
     @try {
-        // Use the standard _MASReceipt/receipt path in the bundle
-        NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
-        return [bundlePath stringByAppendingPathComponent:@"_MASReceipt/receipt"];
+        // Use Documents directory (writable) instead of bundle (read-only)
+        NSArray *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString *docs = [dirs firstObject];
+        return [docs stringByAppendingPathComponent:@"_MASReceipt/receipt"];
     } @catch (NSException *e) {
         return nil;
     }
@@ -193,6 +194,13 @@ static void PACreateFakeReceipt(void) {
             PALog(@"receipt path is nil — skipping fake receipt");
             return;
         }
+
+        // Ensure parent directory exists
+        NSString *parentDir = [receiptPath stringByDeletingLastPathComponent];
+        [[NSFileManager defaultManager] createDirectoryAtPath:parentDir
+                                         withIntermediateDirectories:YES
+                                                          attributes:nil
+                                                               error:nil];
 
         NSData *data = PAFakeReceiptData();
         NSError *err = nil;
