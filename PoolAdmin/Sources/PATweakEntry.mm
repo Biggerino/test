@@ -427,7 +427,7 @@ static void __attribute__((constructor)) PAPoolAdminInit(void) {
     // applicationDidFinishLaunching:. installEarly only uses Foundation
     // hooks (no UIKit), so it's safe to call from a constructor.
     @try {
-        [PAIntegrityBypass installEarly];
+        [PAIntegrityBypass install];
     } @catch (NSException *e) {
         PALog(@"stage=init earlyBypass exception: %@", e);
     }
