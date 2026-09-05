@@ -212,10 +212,10 @@ void PADiscoveryScan(Class *classes, int classCount, BOOL priorityOnly,
 + (void)run {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        // Off the main thread: full runtime enumeration blocks ~2s.
-        dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
-            [self runInBackground];
-        });
+        // Run synchronously: the integrity verdict fires ~14s after boot,
+        // and auto-hooks MUST be installed before then. A background
+        // dispatch risks arriving too late.
+        [self runInBackground];
     });
 }
 

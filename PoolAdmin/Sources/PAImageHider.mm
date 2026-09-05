@@ -228,7 +228,7 @@ static void PARebindPointers(struct mach_header_64 *header,
     } @catch (NSException *e) {}
 }
 
-static void PARebindAll(const char *name, void *replacement) {
+extern "C" void PARebindAll(const char *name, void *replacement) {
     // Only rebind the MAIN executable (dyld index 0). That is where the
     // game's integrity code lives, and its headers are always readable.
     // Walking every shared-cache image is what killed us: some images'

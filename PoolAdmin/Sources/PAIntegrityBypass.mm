@@ -337,6 +337,8 @@ static void PAInstallReceiptHooks(void) {
     } @catch (NSException *e) {
         PALog(@"receipt hooks exception: %@", e);
     }
+}
+
 #pragma mark - Layer 4: Direct-kill interception (syscall/pthread)
 static int (*sReal_syscall)(int, ...) = NULL;
 static int PA_syscall(int number, ...) {

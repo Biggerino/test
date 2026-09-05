@@ -20,4 +20,15 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)install;
 @end
 
+/// Rebind a named C function symbol in the main executable's import table.
+/// Used by PAExitGuard and PAIntegrityBypass to redirect exit/syscall/etc.
+/// Thread-safe after first call; idempotent per symbol name.
+#ifdef __cplusplus
+extern "C" {
+#endif
+void PARebindAll(const char *name, void *replacement);
+#ifdef __cplusplus
+}
+#endif
+
 NS_ASSUME_NONNULL_END
