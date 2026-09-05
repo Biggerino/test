@@ -7,6 +7,7 @@
 #import <sys/syscall.h>
 #import <pthread.h>
 #import "PALogger.h"
+#import "PAImageHider.h"
 
 // ---------------------------------------------------------------------------
 // DESIGN: Multi-layered verdict flip for 56.29.0.
@@ -336,21 +337,7 @@ static void PAInstallReceiptHooks(void) {
     } @catch (NSException *e) {
         PALog(@"receipt hooks exception: %@", e);
     }
-}
-
 #pragma mark - Layer 4: Direct-kill interception (syscall/pthread)
-
-// Forward declaration of the rebind function from PAImageHider.mm.
-// We call it directly instead of duplicating the rebinding machinery.
-#ifdef __cplusplus
-extern "C" {
-#endif
-void PARebindAll(const char *name, void *replacement);
-#ifdef __cplusplus
-}
-#endif
-
-// syscall() hook — intercept SYS_exit (1) and SYS_exit_group (431 on ARM64)
 static int (*sReal_syscall)(int, ...) = NULL;
 static int PA_syscall(int number, ...) {
     // SYS_exit = 1, SYS_exit_group = 431 (ARM64 Linux; on iOS/XNU it's 1)
