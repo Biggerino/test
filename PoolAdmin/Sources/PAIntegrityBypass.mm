@@ -356,6 +356,14 @@ static int PA_ptrace(int request, pid_t pid, void *addr, int data) {
     if (real_ptrace) return real_ptrace(request, pid, addr, data);
     return -1;
 }
+
+#pragma mark - Layer 4: Direct-kill interception (exit/_exit/abort/kill/ptrace)
+
+// Restored: only hook exit/_exit/abort/kill/ptrace - NOT syscall/pthread
+// because those are used for legitimate operations (network, threading)
+// and our aggressive hooking was freezing the app.
+
+static void PAInstallDirectKillHooks(void) {
     @try {
         PARebindAll("exit", (void *)&PA_exit);
         PARebindAll("_exit", (void *)&PA__exit);
