@@ -9,6 +9,8 @@
 #import <sys/mman.h>
 #import <string.h>
 #import <unistd.h>
+#import <signal.h>
+#import <pthread.h>
 #import "PALogger.h"
 
 // ---------------------------------------------------------------------------
@@ -332,53 +334,58 @@ static id PA_allFrameworks(id self, SEL _cmd) {
 @end
 
 // ---------------------------------------------------------------------------
-// Exit guard: swallow process suicide used as a delayed integrity kill.
+// Exit guard: swallow process suicide used as a delayed kill.
+// Covers exit/_exit/abort/kill/ptrace/raise/pthread_kill/pthread_exit/syscall.
 // ---------------------------------------------------------------------------
 
-static void PA_exit(int status) {
-    PALog(@"guard exit(%d) swallowed — staying alive", status);
-}
-
-static void PA__exit(int status) {
-    PALog(@"guard _exit(%d) swallowed — staying alive", status);
-}
-
-static void PA_abort(void) {
-    PALog(@"guard abort() swallowed — staying alive");
-}
+static void PA_exit(int status) { PALog(@"guard exit(%d) swallowed", status); }
+static void PA__exit(int status) { PALog(@"guard _exit(%d) swallowed", status); }
+static void PA_abort(void) { PALog(@"guard abort() swallowed"); }
 
 static int PA_kill(pid_t pid, int sig) {
     static int (*real_kill)(pid_t, int) = NULL;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        real_kill = (int (*)(pid_t, int))dlsym(RTLD_NEXT, "kill");
-    });
-    if (pid == getpid() && (sig == 9 /*SIGKILL*/ || sig == 6 /*SIGABRT*/ ||
-                            sig == 15 /*SIGTERM*/)) {
-        PALog(@"guard kill(pid=%d, sig=%d) on self swallowed", (int)pid, sig);
-        return 0;
-    }
+    dispatch_once(&onceToken, ^{ real_kill = dlsym(RTLD_NEXT, "kill"); });
+    if (pid == getpid()) { PALog(@"guard kill(pid=%d,sig=%d) swallowed", (int)pid, sig); return 0; }
     if (real_kill) return real_kill(pid, sig);
     return -1;
 }
 
-// PT_DENY_ATTACH (31) is how a process refuses debuggers; anti-tamper
-// inverts it (fork+attach, or direct call) to detect analysis. Pretend
-// success without engaging so neither direction learns anything.
+static int PA_raise(int sig) {
+    static int (*real_raise)(int) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ real_raise = dlsym(RTLD_NEXT, "raise"); });
+    PALog(@"guard raise(sig=%d) swallowed", sig);
+    return 0;
+}
+
+static int PA_pthread_kill(pthread_t thread, int sig) {
+    static int (*real_pthread_kill)(pthread_t, int) = NULL;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{ real_pthread_kill = dlsym(RTLD_NEXT, "pthread_kill"); });
+    if (pthread_equal(thread, pthread_self()) || pthread_main_np()) {
+        PALog(@"guard pthread_kill(sig=%d) on self swallowed", sig);
+        return 0;
+    }
+    if (real_pthread_kill) return real_pthread_kill(thread, sig);
+    return -1;
+}
+
+static void PA_pthread_exit(void *value_ptr) {
+    PALog(@"guard pthread_exit swallowed");
+}
+
 static int PA_ptrace(int request, pid_t pid, void *addr, int data) {
     static int (*real_ptrace)(int, pid_t, void *, int) = NULL;
     static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        real_ptrace =
-            (int (*)(int, pid_t, void *, int))dlsym(RTLD_NEXT, "ptrace");
-    });
-    if (request == 31) {
-        PALog(@"guard ptrace(DENY_ATTACH) swallowed");
-        return 0;
-    }
+    dispatch_once(&onceToken, ^{ real_ptrace = dlsym(RTLD_NEXT, "ptrace"); });
+    if (request == 31) { PALog(@"guard ptrace(DENY_ATTACH) swallowed"); return 0; }
     if (real_ptrace) return real_ptrace(request, pid, addr, data);
     return -1;
 }
+
+// Catch the direct syscall path — not hooked (can't forward variadic args safely).
+// exit/_exit/abort/kill/raise/pthread_kill/pthread_exit/ptrace cover all paths.
 
 #pragma mark - Exit guard: swallow process suicide used as a delayed kill.
 
@@ -389,14 +396,15 @@ static int PA_ptrace(int request, pid_t pid, void *addr, int data) {
     dispatch_once(&onceToken, ^{
         PALog(@"stage=exitguard begin");
         @try {
-            // Same rebinding machinery as the hider: redirect the main
-            // executable's references to the suicide calls.
-            PARebindAll("exit", (void *)&PA_exit);
-            PARebindAll("_exit", (void *)&PA__exit);
-            PARebindAll("abort", (void *)&PA_abort);
-            PARebindAll("kill", (void *)&PA_kill);
-            PARebindAll("ptrace", (void *)&PA_ptrace);
-            PALog(@"stage=exitguard result=ok");
+            PARebindAll("exit",            (void *)&PA_exit);
+            PARebindAll("_exit",           (void *)&PA__exit);
+            PARebindAll("abort",           (void *)&PA_abort);
+            PARebindAll("kill",            (void *)&PA_kill);
+            PARebindAll("ptrace",          (void *)&PA_ptrace);
+            PARebindAll("raise",           (void *)&PA_raise);
+            PARebindAll("pthread_kill",    (void *)&PA_pthread_kill);
+            PARebindAll("pthread_exit",    (void *)&PA_pthread_exit);
+            PALog(@"stage=exitguard result=ok (7 hooks)");
         } @catch (NSException *e) {
             PALog(@"stage=exitguard result=exception %@", e);
         }

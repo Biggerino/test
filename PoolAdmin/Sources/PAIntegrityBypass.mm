@@ -276,39 +276,11 @@ static NSData *PA_contentsAtPath(id self, SEL _cmd, NSString *path) {
     return nil;
 }
 
+// Receipt hooks DISABLED — they were causing infinite receipt validation
+// retry loops that froze the game on the connecting screen.
+// The game validates receipts through its own server-side path.
 static void PAInstallReceiptHooks(void) {
-    @try {
-        PACreateFakeReceipt();
-
-        // Hook appStoreReceiptURL on NSBundle
-        Method receiptURLMethod = class_getInstanceMethod(
-            [NSBundle class], NSSelectorFromString(@"appStoreReceiptURL"));
-        if (receiptURLMethod) {
-            sOriginal_appStoreReceiptURL = method_getImplementation(receiptURLMethod);
-            method_setImplementation(receiptURLMethod, (IMP)PA_appStoreReceiptURL);
-            PALog(@"receipt hooked -[NSBundle appStoreReceiptURL]");
-        }
-
-        // Hook NSFileManager contentsAtPath:
-        Method contentsMethod = class_getInstanceMethod(
-            [NSFileManager class], @selector(contentsAtPath:));
-        if (contentsMethod) {
-            sOriginal_contentsAtPath = method_getImplementation(contentsMethod);
-            method_setImplementation(contentsMethod, (IMP)PA_contentsAtPath);
-            PALog(@"receipt hooked -[NSFileManager contentsAtPath:]");
-        }
-
-        // Hook +[NSData dataWithContentsOfURL:]
-        Method dataURLMethod = class_getClassMethod(
-            [NSData class], @selector(dataWithContentsOfURL:));
-        if (dataURLMethod) {
-            sOriginal_dataWithContentsOfURL = method_getImplementation(dataURLMethod);
-            method_setImplementation(dataURLMethod, (IMP)PA_dataWithContentsOfURL);
-            PALog(@"receipt hooked +[NSData dataWithContentsOfURL:]");
-        }
-    } @catch (NSException *e) {
-        PALog(@"receipt hooks exception: %@", e);
-    }
+    PALog(@"receipt hooks disabled — skipping");
 }
 
 #pragma mark - Alert suppression (presentViewController:)
@@ -346,82 +318,9 @@ static void PA_presentVC(id self, SEL _cmd, UIViewController *vc, BOOL anim, voi
     }
 }
 
-#pragma mark - Jailbreak filesystem cloak
+#pragma mark - Alert suppression (presentViewController:)
 
-static BOOL PAIsJailbreakPath(NSString *path) {
-    if (![path isKindOfClass:NSString.class] || !path.length) return NO;
-    static NSArray<NSString *> *markers;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        markers = @[
-            @"/Applications/Cydia.app",
-            @"/Applications/Sileo.app",
-            @"/Applications/Zebra.app",
-            @"/bin/bash", @"/bin/sh", @"/usr/sbin/sshd",
-            @"/etc/apt", @"/private/var/lib/apt",
-            @"/Library/MobileSubstrate",
-            @"/usr/lib/libsubstrate",
-            @"/usr/lib/substitute",
-            @"cydia", @"sileo", @"zebra",
-        ];
-    });
-    NSString *lower = path.lowercaseString;
-    for (NSString *m in markers) {
-        if ([lower containsString:m.lowercaseString]) return YES;
-    }
-    return NO;
-}
-
-static IMP sOriginal_fileExists = NULL;
-static IMP sOriginal_fileExistsDir = NULL;
-
-static BOOL PA_fileExists(id self, SEL _cmd, NSString *path) {
-    if (PAIsJailbreakPath(path)) return NO;
-    // Also hide mobileprovision from file-exists checks
-    @try {
-        if ([path isKindOfClass:NSString.class]) {
-            if ([path hasSuffix:@"embedded.mobileprovision"]) {
-                PALog(@"mobileprovision fileExists blocked: %@", path);
-                return NO;
-            }
-            if ([path hasSuffix:@"StoreKit_receipt"] ||
-                [path hasSuffix:@"sandboxReceipt"] ||
-                [path hasSuffix:@"_MASReceipt/receipt"]) {
-                return YES;
-            }
-        }
-    } @catch (NSException *e) {}
-    if (sOriginal_fileExists) {
-        return ((BOOL(*)(id, SEL, NSString *))sOriginal_fileExists)(self, _cmd, path);
-    }
-    return NO;
-}
-
-static BOOL PA_fileExistsDir(id self, SEL _cmd, NSString *path, BOOL *isDir) {
-    if (PAIsJailbreakPath(path)) {
-        if (isDir) *isDir = NO;
-        return NO;
-    }
-    @try {
-        if ([path isKindOfClass:NSString.class]) {
-            if ([path hasSuffix:@"embedded.mobileprovision"]) {
-                if (isDir) *isDir = NO;
-                return NO;
-            }
-            if ([path hasSuffix:@"StoreKit_receipt"] ||
-                [path hasSuffix:@"sandboxReceipt"] ||
-                [path hasSuffix:@"_MASReceipt/receipt"]) {
-                if (isDir) *isDir = NO;
-                return YES;
-            }
-        }
-    } @catch (NSException *e) {}
-    if (sOriginal_fileExistsDir) {
-        return ((BOOL(*)(id, SEL, NSString *, BOOL *))sOriginal_fileExistsDir)(
-            self, _cmd, path, isDir);
-    }
-    return NO;
-}
+static IMP sOriginal_present = NULL;
 
 #pragma mark - Layer 6: AppsFlyer V2 Sanity Flags
 
@@ -559,25 +458,8 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
             PALog(@"bypass phase1 exception: %@", e);
         }
 
-        // ── Phase 1b: Jailbreak filesystem cloak ──
-        @try {
-            Method a = class_getInstanceMethod([NSFileManager class],
-                                               @selector(fileExistsAtPath:));
-            if (a) {
-                sOriginal_fileExists = method_getImplementation(a);
-                method_setImplementation(a, (IMP)PA_fileExists);
-            }
-            Method b = class_getInstanceMethod(
-                [NSFileManager class],
-                @selector(fileExistsAtPath:isDirectory:));
-            if (b) {
-                sOriginal_fileExistsDir = method_getImplementation(b);
-                method_setImplementation(b, (IMP)PA_fileExistsDir);
-            }
-            PALog(@"bypass phase1b-fs done");
-        } @catch (NSException *e) {
-            PALog(@"bypass phase1b exception: %@", e);
-        }
+// ── Phase 1b: Jailbreak filesystem cloak DISABLED —
+// it was interfering with file operations during network setup ──
 
         // ── Phase 1c: Hardcoded Miniclip integrity class hooks ──
         // These classes exist in the 56.29.0 binary but aren't loaded until
@@ -730,24 +612,8 @@ static const int kGameClassCount = sizeof(kGameClasses) / sizeof(kGameClasses[0]
             PALog(@"bypass early swizzle exception: %@", e);
         }
 
-        // Filesystem cloak
-        @try {
-            Method a = class_getInstanceMethod([NSFileManager class],
-                                               @selector(fileExistsAtPath:));
-            if (a) {
-                sOriginal_fileExists = method_getImplementation(a);
-                method_setImplementation(a, (IMP)PA_fileExists);
-            }
-            Method b = class_getInstanceMethod(
-                [NSFileManager class],
-                @selector(fileExistsAtPath:isDirectory:));
-            if (b) {
-                sOriginal_fileExistsDir = method_getImplementation(b);
-                method_setImplementation(b, (IMP)PA_fileExistsDir);
-            }
-        } @catch (NSException *e) {
-            PALog(@"bypass early fs exception: %@", e);
-        }
+// Filesystem cloak DISABLED — was interfering with file ops during network setup
+        PALog(@"bypass early fs disabled");
 
         // AppsFlyer sanity hooks
         @try {
