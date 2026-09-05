@@ -178,8 +178,9 @@ static NSData *PAFakeReceiptData(void) {
 
 static NSString *PAFakeReceiptPath(void) {
     @try {
-        NSString *docs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES).firstObject;
-        return [docs stringByAppendingPathComponent:@"StoreKit_receipt"];
+        // Use the standard _MASReceipt/receipt path in the bundle
+        NSString *bundlePath = [[NSBundle mainBundle] bundlePath];
+        return [bundlePath stringByAppendingPathComponent:@"_MASReceipt/receipt"];
     } @catch (NSException *e) {
         return nil;
     }
